@@ -23,11 +23,12 @@ type Handler struct {
 	sheets           *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs         map[domain.PiscineType]map[int]string
 	sheetURLs        map[domain.PiscineType]map[int]string
-	universalSheetID string            // shared fallback table for RUST / "other" pools
-	authorized       map[int64]bool    // allowlist of group chat IDs permitted to issue commands
-	superAdminID     int64             // the single user who approves/rejects access requests
-	loc              *time.Location    // configured timezone, used for date arithmetic
-	editSessions     *editSessionStore // in-memory /edit_tables dialog state, keyed by chat
+	sheetSlots       map[string][]string // spreadsheet ID → SHEET_* names pointing at it
+	universalSheetID string              // shared fallback table for RUST / "other" pools
+	authorized       map[int64]bool      // allowlist of group chat IDs permitted to issue commands
+	superAdminID     int64               // the single user who approves/rejects access requests
+	loc              *time.Location      // configured timezone, used for date arithmetic
+	editSessions     *editSessionStore   // in-memory /edit_tables dialog state, keyed by chat
 	logger           *slog.Logger
 }
 
@@ -51,6 +52,7 @@ func NewHandler(
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
 	sheetURLs map[domain.PiscineType]map[int]string,
+	sheetSlots map[string][]string,
 	universalSheetID string,
 	authorizedChatIDs []int64,
 	superAdminID int64,
@@ -72,6 +74,7 @@ func NewHandler(
 		sheets:           sheetsClient,
 		sheetIDs:         sheetIDs,
 		sheetURLs:        sheetURLs,
+		sheetSlots:       sheetSlots,
 		universalSheetID: universalSheetID,
 		authorized:       allow,
 		superAdminID:     superAdminID,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -56,6 +57,12 @@ type Config struct {
 	// Pre-configured Google Sheets defense tables, indexed by piscine and week.
 	SheetIDs  map[domain.PiscineType]map[int]string
 	SheetURLs map[domain.PiscineType]map[int]string
+
+	// SheetSlots maps each configured spreadsheet ID to every SHEET_* variable
+	// pointing at it (sorted). Two or more names for one ID mean two slots share
+	// a single physical document, so writing one silently destroys the other's
+	// defense table — the bot warns instead of losing data quietly.
+	SheetSlots map[string][]string
 
 	// UniversalSheetID/URL is the shared fallback defense table (SHEET_UNIVERSAL)
 	// used for piscines without a dedicated sheet: Piscine RUST and any
@@ -178,9 +185,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("ADMIN_USER_IDS: %w", err)
 	}
 
-	sheetIDs, sheetURLs := loadSheetMaps()
+	sheetIDs, sheetURLs, sheetSlots := loadSheetMaps()
 	universalURL := strings.TrimSpace(os.Getenv("SHEET_UNIVERSAL"))
 	universalID := parseSpreadsheetID(universalURL)
+	if universalID != "" {
+		sheetSlots[universalID] = append(sheetSlots[universalID], "SHEET_UNIVERSAL")
+	}
+	for id := range sheetSlots {
+		sort.Strings(sheetSlots[id])
+	}
 
 	regionEvents, err := loadRegionEvents()
 	if err != nil {
@@ -203,6 +216,7 @@ func Load() (*Config, error) {
 		GoogleCredentialsFile: os.Getenv("GOOGLE_CREDENTIALS_FILE"),
 		SheetIDs:              sheetIDs,
 		SheetURLs:             sheetURLs,
+		SheetSlots:            sheetSlots,
 		UniversalSheetID:      universalID,
 		UniversalSheetURL:     universalURL,
 		RegionEvents:          regionEvents,
@@ -251,9 +265,14 @@ func loadRegionEvents() (map[string]domain.RegionUpdateEventsConfig, error) {
 	return out, nil
 }
 
-func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain.PiscineType]map[int]string) {
+func loadSheetMaps() (
+	ids map[domain.PiscineType]map[int]string,
+	urls map[domain.PiscineType]map[int]string,
+	slots map[string][]string,
+) {
 	ids = make(map[domain.PiscineType]map[int]string)
 	urls = make(map[domain.PiscineType]map[int]string)
+	slots = make(map[string][]string)
 
 	for _, e := range sheetEnvMap {
 		raw := strings.TrimSpace(os.Getenv(e.env))
@@ -270,8 +289,23 @@ func loadSheetMaps() (ids map[domain.PiscineType]map[int]string, urls map[domain
 		}
 		ids[e.piscine][e.week] = spreadsheetID
 		urls[e.piscine][e.week] = raw
+		slots[spreadsheetID] = append(slots[spreadsheetID], e.env)
 	}
-	return ids, urls
+	return ids, urls, slots
+}
+
+// DuplicateSheetSlots returns the spreadsheet IDs configured in more than one
+// SHEET_* slot, mapped to the names of those slots. Each entry is a pair of
+// weeks (or piscines) whose defense tables live in the same document and
+// therefore overwrite each other.
+func (c *Config) DuplicateSheetSlots() map[string][]string {
+	dups := make(map[string][]string)
+	for id, names := range c.SheetSlots {
+		if len(names) > 1 {
+			dups[id] = names
+		}
+	}
+	return dups
 }
 
 // parseSpreadsheetID extracts the spreadsheet ID from a full Google Sheets edit

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +32,8 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidai3 — информация о рейде Piscine AI 3\n" +
 		"/raidrust — информация о рейде Piscine RUST\n" +
 		"/week — текущая неделя для всех Piscine\n" +
-		"/create_tables — обновить Google Sheets таблицы защит для всех активных рейдов\n" +
+		"/create_tables {бассейн} — обновить таблицу защит одного бассейна (go, js, ai1, ai2, ai3, rust)\n" +
+		"/create_tables — обновить таблицы защит всех бассейнов с идущим рейдом\n" +
 		"/edit_tables — создать/обновить таблицу защиты с ручными параметрами\n" +
 		"/get_region_updates — статистика обновлений по всем регионам\n" +
 		"/get_astana_updates — статистика обновлений Astana\n" +
@@ -121,7 +123,14 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 	}
 }
 
-// HandleTables handles the /create_tables command.
+// HandleTables handles "/create_tables [бассейн]".
+//
+// With no argument it still covers every piscine with a running raid, but it no
+// longer writes blindly: targets are resolved first and any two that would land
+// in the SAME spreadsheet are refused, because the second write would wipe the
+// first one's defense table. With an argument ("/create_tables go") exactly one
+// piscine is updated, which is the safe way to work when several pools share a
+// document.
 func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID, ok := h.guard(ctx, update)
 	if !ok {
@@ -133,14 +142,69 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
+	piscines, argOK := parseTablesArg(update.Message.Text)
+	if !argOK {
+		_ = h.adapter.SendMessage(ctx, chatID, tablesUsage())
+		return
+	}
+
 	// Defense is on Monday — computed in the configured timezone so the date
 	// matches what admins see locally regardless of the container clock.
 	defenseDate := nextMonday(h.now())
 
-	var lines []string
-	updatedCount := 0
+	targets, lines := h.planTableUpdates(ctx, piscines)
+	targets, conflicts := rejectConflictingTargets(targets)
+	lines = append(lines, conflicts...)
 
-	for _, piscine := range domain.AllPiscines() {
+	updatedCount := 0
+	for _, t := range targets {
+		url, err := h.updateTableForActiveRaid(ctx, t.spreadsheetID, t.raid, defenseDate)
+		if err != nil {
+			h.logger.Error("update defense table failed", "piscine", t.piscine, "raid", t.raid.RaidName, "err", err)
+			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", t.piscine))
+			continue
+		}
+
+		updatedCount++
+		line := fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s",
+			escapeHTML(string(t.piscine)), escapeHTML(t.raid.RaidName), url)
+		if warn := h.sharedDocumentWarning(t.spreadsheetID); warn != "" {
+			line += "\n" + warn
+		}
+		lines = append(lines, line)
+	}
+
+	resp := "ℹ️ Сейчас нет идущих рейдов — обновлять нечего."
+	if len(lines) > 0 {
+		resp = strings.Join(lines, "\n")
+	}
+
+	if err := h.adapter.SendMessage(ctx, chatID, resp); err != nil {
+		h.logger.Error("send create_tables result failed", "err", err)
+	}
+
+	h.logger.Info("create_tables finished", "requested", len(piscines), "updated", updatedCount, "total_lines", len(lines))
+}
+
+// tableTarget is one resolved "(piscine, week) → spreadsheet" mapping that
+// /create_tables is about to write.
+type tableTarget struct {
+	piscine       domain.PiscineType
+	week          int
+	raid          *domain.RaidInfo
+	spreadsheetID string
+}
+
+// planTableUpdates resolves each requested piscine to a write target, returning
+// the writable targets plus the reply lines explaining every piscine that was
+// skipped (no raid, registration still open, no sheet configured, upstream
+// error). Nothing is written here — resolving first is what makes the
+// same-document check below possible.
+func (h *Handler) planTableUpdates(ctx context.Context, piscines []domain.PiscineType) ([]tableTarget, []string) {
+	var targets []tableTarget
+	var lines []string
+
+	for _, piscine := range piscines {
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
 		if err != nil {
 			h.logger.Warn("detect week failed", "piscine", piscine, "err", err)
@@ -163,8 +227,6 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 			continue
 		}
 
-		raid := weekInfo.ActiveRaid
-
 		spreadsheetID, dedicated := h.resolveSpreadsheetID(piscine, weekInfo.WeekNumber)
 		if spreadsheetID == "" {
 			h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)
@@ -176,28 +238,124 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 			continue
 		}
 
-		url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, defenseDate)
-		if err != nil {
-			h.logger.Error("update defense table failed", "piscine", piscine, "raid", raid.RaidName, "err", err)
-			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", piscine))
+		targets = append(targets, tableTarget{
+			piscine:       piscine,
+			week:          weekInfo.WeekNumber,
+			raid:          weekInfo.ActiveRaid,
+			spreadsheetID: spreadsheetID,
+		})
+	}
+
+	return targets, lines
+}
+
+// rejectConflictingTargets drops every target that shares a spreadsheet with
+// another target in the same run and explains what happened. Writing both would
+// mean the second one clearing (A1:Z1000) and rewriting the first one's rows —
+// silent data loss. Refusing and naming the per-piscine commands lets the admin
+// update them one at a time (into different documents, or knowingly in turn).
+func rejectConflictingTargets(targets []tableTarget) (writable []tableTarget, lines []string) {
+	byDoc := make(map[string][]tableTarget, len(targets))
+	for _, t := range targets {
+		byDoc[t.spreadsheetID] = append(byDoc[t.spreadsheetID], t)
+	}
+
+	reported := make(map[string]bool, len(byDoc))
+	for _, t := range targets {
+		group := byDoc[t.spreadsheetID]
+		if len(group) == 1 {
+			writable = append(writable, t)
 			continue
 		}
+		if reported[t.spreadsheetID] {
+			continue
+		}
+		reported[t.spreadsheetID] = true
 
-		updatedCount++
-		lines = append(lines, fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s",
-			escapeHTML(string(piscine)), escapeHTML(raid.RaidName), url))
+		names := make([]string, 0, len(group))
+		commands := make([]string, 0, len(group))
+		for _, g := range group {
+			names = append(names, escapeHTML(string(g.piscine)))
+			commands = append(commands, "/create_tables "+piscineArgFor(g.piscine))
+		}
+		lines = append(lines, fmt.Sprintf(
+			"⛔️ %s настроены на одну и ту же Google-таблицу — обновление затёрло бы данные друг друга, поэтому ничего не записано.\n"+
+				"Обновите по одному: %s\n"+
+				"Либо задайте им разные SHEET_* таблицы в .env.",
+			strings.Join(names, " и "), strings.Join(commands, ", "),
+		))
+	}
+	return writable, lines
+}
+
+// sharedDocumentWarning flags a write into a document that more than one SHEET_*
+// slot points at (e.g. SHEET_GO_WEEK1 and SHEET_GO_WEEK2 holding the same URL):
+// the table just written replaced whatever the other slot had there.
+func (h *Handler) sharedDocumentWarning(spreadsheetID string) string {
+	slots := h.sheetSlots[spreadsheetID]
+	if len(slots) < 2 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"⚠️ Этот документ указан сразу в %s — предыдущая таблица защит в нём перезаписана. "+
+			"Чтобы данные не терялись, задайте разные ссылки в .env.",
+		escapeHTML(strings.Join(slots, ", ")),
+	)
+}
+
+// piscineArgs maps the /create_tables argument to a piscine. Short aliases keep
+// the command quick to type; "all" restores the update-everything behavior.
+var piscineArgs = map[string]domain.PiscineType{
+	"go":   domain.PiscineGo,
+	"js":   domain.PiscineJS,
+	"ai1":  domain.PiscineAI_1,
+	"ai2":  domain.PiscineAI_2,
+	"ai3":  domain.PiscineAI_3,
+	"rust": domain.PiscineRUST,
+}
+
+// piscineArgFor is the reverse lookup, so error messages can name the exact
+// command to run. Falls back to the piscine string for an unmapped type.
+func piscineArgFor(p domain.PiscineType) string {
+	for arg, piscine := range piscineArgs {
+		if piscine == p {
+			return arg
+		}
+	}
+	return string(p)
+}
+
+// parseTablesArg reads the optional piscine argument of "/create_tables [arg]".
+// No argument (or "all") means every piscine, as before. ok=false signals an
+// unrecognized argument, so the caller can show the usage line instead of
+// silently updating everything — which is exactly the accident this command
+// used to make easy.
+func parseTablesArg(text string) (piscines []domain.PiscineType, ok bool) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		return domain.AllPiscines(), true
 	}
 
-	resp := "ℹ️ На этой неделе нет активных рейдов — обновлять нечего."
-	if len(lines) > 0 {
-		resp = strings.Join(lines, "\n")
+	arg := strings.ToLower(strings.TrimPrefix(fields[1], "/"))
+	if arg == "all" || arg == "все" {
+		return domain.AllPiscines(), true
 	}
-
-	if err := h.adapter.SendMessage(ctx, chatID, resp); err != nil {
-		h.logger.Error("send create_tables result failed", "err", err)
+	if piscine, found := piscineArgs[arg]; found {
+		return []domain.PiscineType{piscine}, true
 	}
+	return nil, false
+}
 
-	h.logger.Info("create_tables finished", "updated", updatedCount, "total_lines", len(lines))
+// tablesUsage lists the accepted arguments, sorted so the message is stable.
+func tablesUsage() string {
+	args := make([]string, 0, len(piscineArgs))
+	for arg := range piscineArgs {
+		args = append(args, arg)
+	}
+	sort.Strings(args)
+	return "ℹ️ Использование: <code>/create_tables {бассейн}</code>\n" +
+		"Бассейны: " + strings.Join(args, ", ") + "\n" +
+		"<code>/create_tables</code> без аргумента (или <code>all</code>) — все бассейны с идущим рейдом."
 }
 
 func (h *Handler) HandleAstanaUpdates(ctx context.Context, b *bot.Bot, update *models.Update) {

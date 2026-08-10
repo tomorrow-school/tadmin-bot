@@ -265,7 +265,7 @@ func TestLoadSheetMaps_AIStreamsIndependent(t *testing.T) {
 	t.Setenv("SHEET_AI2_WEEK1", "https://docs.google.com/spreadsheets/d/AI2_WEEK1_ID/edit")
 	t.Setenv("SHEET_AI3_WEEK1", "https://docs.google.com/spreadsheets/d/AI3_WEEK1_ID/edit")
 
-	ids, urls := loadSheetMaps()
+	ids, urls, _ := loadSheetMaps()
 
 	cases := []struct {
 		piscine domain.PiscineType
@@ -333,5 +333,49 @@ func TestEnsureScheme(t *testing.T) {
 		if got := ensureScheme(tc.in); got != tc.want {
 			t.Errorf("ensureScheme(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestDuplicateSheetSlots verifies the bot can detect two SHEET_* variables
+// pointing at one document — the .env mistake behind "/create_tables wiped the
+// other raid's defense data", since one document cannot hold two tables.
+func TestDuplicateSheetSlots(t *testing.T) {
+	envs := requiredEnvs()
+	setEnv(t, envs)
+	const shared = "https://docs.google.com/spreadsheets/d/SHARED_ID/edit"
+	t.Setenv("SHEET_GO_WEEK1", shared)
+	t.Setenv("SHEET_GO_WEEK2", shared)
+	t.Setenv("SHEET_GO_WEEK3", "https://docs.google.com/spreadsheets/d/OWN_ID/edit")
+	t.Setenv("SHEET_UNIVERSAL", "https://docs.google.com/spreadsheets/d/UNIVERSAL_ID/edit")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	dups := cfg.DuplicateSheetSlots()
+	if len(dups) != 1 {
+		t.Fatalf("DuplicateSheetSlots() = %v, want exactly one duplicated document", dups)
+	}
+	got := dups["SHARED_ID"]
+	want := []string{"SHEET_GO_WEEK1", "SHEET_GO_WEEK2"}
+	if len(got) != len(want) {
+		t.Fatalf("slots for SHARED_ID = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("slots[%d] = %q, want %q (expected sorted order)", i, got[i], want[i])
+		}
+	}
+
+	// A document used once, and the universal table, are not duplicates.
+	if _, ok := dups["OWN_ID"]; ok {
+		t.Error("OWN_ID reported as duplicated")
+	}
+	if _, ok := dups["UNIVERSAL_ID"]; ok {
+		t.Error("UNIVERSAL_ID reported as duplicated")
+	}
+	if slots := cfg.SheetSlots["UNIVERSAL_ID"]; len(slots) != 1 || slots[0] != "SHEET_UNIVERSAL" {
+		t.Errorf("SheetSlots[UNIVERSAL_ID] = %v, want [SHEET_UNIVERSAL]", slots)
 	}
 }

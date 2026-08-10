@@ -19,7 +19,10 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/raidai3", bot.MatchTypeExact, h.HandleRaidAI3)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/raidrust", bot.MatchTypeExact, h.HandleRaidRust)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/week", bot.MatchTypeExact, h.HandleWeek)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/create_tables", bot.MatchTypeExact, h.HandleTables)
+	// /create_tables takes an optional piscine argument ("/create_tables go"), so
+	// it matches by prefix. No other command starts with this string, so nothing
+	// is shadowed.
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/create_tables", bot.MatchTypePrefix, h.HandleTables)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/edit_tables", bot.MatchTypeExact, h.HandleEditTables)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/cancel", bot.MatchTypeExact, h.HandleCancel)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/get_astana_updates", bot.MatchTypeExact, h.HandleAstanaUpdates)

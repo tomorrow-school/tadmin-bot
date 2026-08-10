@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -54,6 +55,15 @@ func main() {
 
 	if len(cfg.AdminChatIDs) == 0 {
 		logger.Warn("no ADMIN_CHAT_IDS/CHAT_IDS configured — bot will reject ALL commands (fail-closed)")
+	}
+
+	// Two SHEET_* slots pointing at one document mean the defense table of one
+	// week/piscine is overwritten by the other. That is a configuration mistake
+	// the bot cannot fix on its own, so surface it loudly at startup — the
+	// /create_tables reply repeats the warning when it actually writes.
+	for id, slots := range cfg.DuplicateSheetSlots() {
+		logger.Warn("several SHEET_* variables point at the same spreadsheet — their defense tables will overwrite each other",
+			"spreadsheet_id", id, "slots", strings.Join(slots, ", "))
 	}
 
 	// Resolve the configured timezone once so date arithmetic (nextMonday) is
@@ -140,6 +150,7 @@ func main() {
 		sheetsClient,
 		cfg.SheetIDs,
 		cfg.SheetURLs,
+		cfg.SheetSlots,
 		cfg.UniversalSheetID,
 		cfg.AdminChatIDs,
 		cfg.SuperAdminID,
