@@ -1,6 +1,9 @@
 package usecase
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // TestCalculateDefenseSchedule_Columns verifies that the number of columns
 // drives the row count (rows = ceil(teams/columns)) and is carried through to
@@ -28,8 +31,8 @@ func TestCalculateDefenseSchedule_Columns(t *testing.T) {
 			got := CalculateDefenseSchedule(ScheduleParams{
 				TeamsCount:    tc.teams,
 				Columns:       tc.columns,
-				StartHour:     DefaultStartHour,
-				StartMinute:   DefaultStartMinute,
+				StartHour:     11,
+				StartMinute:   0,
 				IncludeBreaks: true,
 			})
 			if got.Rows != tc.wantRows {
@@ -177,11 +180,81 @@ func TestCalculateDefenseScheduleWindow(t *testing.T) {
 	})
 }
 
-// TestDefaultScheduleParams pins the historical defaults so the automatic paths
-// (/create_tables, scheduled reminder) keep producing the same layout.
-func TestDefaultScheduleParams(t *testing.T) {
-	p := DefaultScheduleParams(12)
-	if p.TeamsCount != 12 || p.Columns != 3 || p.StartHour != 11 || p.StartMinute != 0 || !p.IncludeBreaks {
-		t.Errorf("DefaultScheduleParams(12) = %+v, want {12, 3, 11, 0, true}", p)
+// TestAutoScheduleParams pins the automatic layout: 3 columns, no breaks, and a
+// start time derived backwards from the 17:30 deadline. The 18-team case is the
+// worked example from the admin: 18 teams → 6 rows → 14:30–17:30.
+func TestAutoScheduleParams(t *testing.T) {
+	cases := []struct {
+		name        string
+		teams       int
+		wantStartHM string
+	}{
+		{"18_teams_6_rows", 18, "14:30"},    // 6 rows × 30 min back from 17:30
+		{"9_teams_3_rows", 9, "16:00"},      // 3 rows × 30 min
+		{"1_team_1_row", 1, "17:00"},        // ceil(1/3) = 1 row
+		{"19_teams_7_rows", 19, "14:00"},    // ceil(19/3) = 7 rows
+		{"no_teams_no_rows", 0, "17:30"},    // degenerate: empty table, start == end
+		{"absurd_team_count", 300, "00:00"}, // 100 rows would need 50h → clamped to midnight
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			p := AutoScheduleParams(tc.teams)
+			if p.TeamsCount != tc.teams {
+				t.Errorf("TeamsCount = %d, want %d", p.TeamsCount, tc.teams)
+			}
+			if p.Columns != DefaultColumns {
+				t.Errorf("Columns = %d, want %d", p.Columns, DefaultColumns)
+			}
+			if p.IncludeBreaks {
+				t.Error("IncludeBreaks = true, want false for the automatic path")
+			}
+			gotHM := fmt.Sprintf("%02d:%02d", p.StartHour, p.StartMinute)
+			if gotHM != tc.wantStartHM {
+				t.Errorf("start = %s, want %s", gotHM, tc.wantStartHM)
+			}
+		})
+	}
+}
+
+// TestAutoScheduleEndsAt1730 is the end-to-end check of the deadline rule: for
+// every plausible team count the rendered schedule ends exactly at 17:30 and
+// carries no breaks.
+func TestAutoScheduleEndsAt1730(t *testing.T) {
+	for teams := 1; teams <= 60; teams++ {
+		got := CalculateDefenseSchedule(AutoScheduleParams(teams))
+		if got.EndTime != "17:30" {
+			t.Errorf("teams=%d: EndTime = %q, want 17:30", teams, got.EndTime)
+		}
+		if len(got.BreakAfterRows) != 0 || len(got.BreakTimes) != 0 {
+			t.Errorf("teams=%d: expected no breaks, got rows=%v times=%v",
+				teams, got.BreakAfterRows, got.BreakTimes)
+		}
+		if wantRows := (teams + 2) / 3; got.Rows != wantRows { // ceil(teams/3)
+			t.Errorf("teams=%d: Rows = %d, want %d", teams, got.Rows, wantRows)
+		}
+	}
+}
+
+// TestAutoSchedule18Teams spells out the admin's example end to end, including
+// the human-readable line that goes into the reminder message. The displayed
+// range ends at the START of the last slot (17:00), which is the pre-existing
+// formatSchedule convention — the last defense still runs 17:00–17:30.
+func TestAutoSchedule18Teams(t *testing.T) {
+	got := CalculateDefenseSchedule(AutoScheduleParams(18))
+	if got.Rows != 6 {
+		t.Errorf("Rows = %d, want 6", got.Rows)
+	}
+	if got.Columns != 3 {
+		t.Errorf("Columns = %d, want 3", got.Columns)
+	}
+	if got.TotalSlots != 18 {
+		t.Errorf("TotalSlots = %d, want 18", got.TotalSlots)
+	}
+	if got.StartTime != "14:30" || got.EndTime != "17:30" {
+		t.Errorf("window = %s–%s, want 14:30–17:30", got.StartTime, got.EndTime)
+	}
+	if got.RecommendedSchedule != "14:30–17:00" {
+		t.Errorf("RecommendedSchedule = %q, want %q", got.RecommendedSchedule, "14:30–17:00")
 	}
 }

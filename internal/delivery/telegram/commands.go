@@ -354,7 +354,7 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 }
 
 func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
-	schedule := usecase.CalculateDefenseSchedule(usecase.DefaultScheduleParams(raid.TeamsCount))
+	schedule := usecase.CalculateDefenseSchedule(usecase.AutoScheduleParams(raid.TeamsCount))
 	return h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
 		RaidName:    raid.RaidName,
 		DefenseDate: defenseDate,

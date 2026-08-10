@@ -314,7 +314,7 @@ func (uc *RaidUseCase) BuildDefenseReminder(
 	}
 
 	raid := weekInfo.ActiveRaid
-	schedule := CalculateDefenseSchedule(DefaultScheduleParams(raid.TeamsCount))
+	schedule := CalculateDefenseSchedule(AutoScheduleParams(raid.TeamsCount))
 
 	strat, ok := uc.strategies[piscine]
 	if !ok {
