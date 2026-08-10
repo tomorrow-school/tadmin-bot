@@ -6,6 +6,63 @@ import (
 	"google.golang.org/api/sheets/v4"
 )
 
+// defaultColumnWidth is the Google Sheets default column width in pixels. The
+// reset restores it so columns of a previous, wider table don't stay stretched.
+const defaultColumnWidth = 100
+
+// resetSheet clears the working range before the new table is written: cell
+// VALUES and cell FORMAT (fill, borders, alignment), plus column widths.
+//
+// Clearing only values (Spreadsheets.Values.Clear, as this used to do) left the
+// formatting behind, and formatSheet only ever paints the rows/columns the NEW
+// table occupies. So after a big table (say 10 rows with two orange break rows)
+// was replaced by a small one (3 rows, no breaks), the old fills and borders
+// stayed on the rows below — the "styles look broken" symptom.
+//
+// The range is clamped to the sheet's real grid: a GridRange past the grid edge
+// is rejected by the API.
+func (c *Client) resetSheet(ctx context.Context, spreadsheetID string, meta sheetMeta) error {
+	rows, cols := resetRange(meta)
+	if rows <= 0 || cols <= 0 {
+		// No grid information (or an empty grid): nothing addressable to reset.
+		return nil
+	}
+
+	_, err := c.sheetsSvc.Spreadsheets.BatchUpdate(spreadsheetID, &sheets.BatchUpdateSpreadsheetRequest{
+		Requests: []*sheets.Request{
+			clearCellsRequest(meta.sheetID, rows, cols),
+			columnWidthRequest(meta.sheetID, 0, cols, defaultColumnWidth),
+		},
+	}).Context(ctx).Do()
+	return err
+}
+
+// resetRange is the range to wipe: the intended A1:Z1000 window, clamped to the
+// sheet's actual grid so the request is never out of bounds. Zero means the
+// sheet reported no usable grid, and the caller skips the reset.
+func resetRange(meta sheetMeta) (rows, cols int64) {
+	return min(meta.rowCount, maxResetRows), min(meta.columnCount, maxResetColumns)
+}
+
+// clearCellsRequest empties both the values and the formatting of a range.
+// Passing an empty CellData with these Fields is how the Sheets API expresses
+// "unset these properties".
+func clearCellsRequest(sheetID, rows, cols int64) *sheets.Request {
+	return &sheets.Request{
+		RepeatCell: &sheets.RepeatCellRequest{
+			Range: &sheets.GridRange{
+				SheetId:          sheetID,
+				StartRowIndex:    0,
+				EndRowIndex:      rows,
+				StartColumnIndex: 0,
+				EndColumnIndex:   cols,
+			},
+			Cell:   &sheets.CellData{},
+			Fields: "userEnteredValue,userEnteredFormat",
+		},
+	}
+}
+
 // formatSheet applies basic formatting: bold header, colored break rows,
 // column widths, and borders. Each formatting concern lives in its own helper;
 // this function just orchestrates the BatchUpdate.

@@ -460,7 +460,7 @@ func (h *Handler) finishEditTable(ctx context.Context, chatID int64, s *editTabl
 		return
 	}
 
-	url, err := h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
+	res, err := h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
 		RaidName:    s.RaidName,
 		DefenseDate: nextMonday(h.now()),
 		Schedule:    schedule,
@@ -476,7 +476,13 @@ func (h *Handler) finishEditTable(ctx context.Context, chatID int64, s *editTabl
 	h.editSessions.clear(chatID)
 
 	window := fmt.Sprintf("%02d:%02d-%02d:%02d", s.StartHour, s.StartMinute, s.EndHour, s.EndMinute)
-	text := fmt.Sprintf("✅ Таблица обновлена: %s", url)
+	text := fmt.Sprintf("✅ Таблица обновлена: %s", res.URL)
+	if res.FormatFailed {
+		text += "\n" + msgFormattingFailed
+	}
+	if warn := h.sharedDocumentWarning(spreadsheetID); warn != "" {
+		text += "\n" + warn
+	}
 	if s.RaidStatus == domain.RaidStatusUpcoming {
 		text += fmt.Sprintf(
 			"\n⏳ Рейд начнётся %s — таблица подготовлена заранее, число команд ещё может измениться.",

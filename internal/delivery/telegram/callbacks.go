@@ -69,14 +69,20 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 	}
 
 	raid := weekInfo.ActiveRaid
-	url, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, nextMonday(h.now()))
+	res, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, nextMonday(h.now()))
 	if err != nil {
 		h.logger.Error("update defense table failed", "err", err)
 		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось обновить таблицу. Попробуйте позже.")
 		return
 	}
 
-	text := fmt.Sprintf("✅ Таблица защит обновлена!\n📊 %s\n🔗 %s", escapeHTML(raid.RaidName), url)
+	text := fmt.Sprintf("✅ Таблица защит обновлена!\n📊 %s\n🔗 %s", escapeHTML(raid.RaidName), res.URL)
+	if res.FormatFailed {
+		text += "\n" + msgFormattingFailed
+	}
+	if warn := h.sharedDocumentWarning(spreadsheetID); warn != "" {
+		text += "\n" + warn
+	}
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send table url failed", "err", err)
 	}

@@ -158,7 +158,7 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 
 	updatedCount := 0
 	for _, t := range targets {
-		url, err := h.updateTableForActiveRaid(ctx, t.spreadsheetID, t.raid, defenseDate)
+		res, err := h.updateTableForActiveRaid(ctx, t.spreadsheetID, t.raid, defenseDate)
 		if err != nil {
 			h.logger.Error("update defense table failed", "piscine", t.piscine, "raid", t.raid.RaidName, "err", err)
 			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", t.piscine))
@@ -167,7 +167,10 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 
 		updatedCount++
 		line := fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s",
-			escapeHTML(string(t.piscine)), escapeHTML(t.raid.RaidName), url)
+			escapeHTML(string(t.piscine)), escapeHTML(t.raid.RaidName), res.URL)
+		if res.FormatFailed {
+			line += "\n" + msgFormattingFailed
+		}
 		if warn := h.sharedDocumentWarning(t.spreadsheetID); warn != "" {
 			line += "\n" + warn
 		}
@@ -543,7 +546,7 @@ func notStartedLine(piscine domain.PiscineType, raid *domain.RaidInfo) string {
 	)
 }
 
-func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
+func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (sheets.UpdateResult, error) {
 	schedule := usecase.CalculateDefenseSchedule(usecase.AutoScheduleParams(raid.TeamsCount))
 	return h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
 		RaidName:    raid.RaidName,
@@ -551,3 +554,7 @@ func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID st
 		Schedule:    schedule,
 	})
 }
+
+// msgFormattingFailed is appended when the rows were written but the styling
+// pass failed, so a visibly ugly table has an explanation in the chat.
+const msgFormattingFailed = "⚠️ Данные записаны, но оформление применить не удалось — попробуйте обновить таблицу ещё раз."
