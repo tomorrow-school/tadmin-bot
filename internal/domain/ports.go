@@ -59,6 +59,17 @@ type OneEduClient interface {
 	GetRegionUpdates(ctx context.Context, campus string, events RegionUpdateEventsConfig) (*RegionUpdatesInfo, error)
 }
 
+// LeadClient fetches application (lead) counts from the public apply/leadform
+// site (apply.tomorrow-school.ai). It is optional: when no lead client is
+// configured the region report simply omits the lead line.
+type LeadClient interface {
+	// GetLeadCountsByCampus returns the application counts per campus (total plus
+	// today's and yesterday's submissions), keyed by campus ID (e.g. "shymkent").
+	// Campuses with no submissions may be absent from the map — a missing key
+	// means zeros, not an error.
+	GetLeadCountsByCampus(ctx context.Context) (map[string]LeadCounts, error)
+}
+
 // TemplateRenderer renders message templates with variable substitution.
 type TemplateRenderer interface {
 	Render(key string, vars map[string]string) (string, error)

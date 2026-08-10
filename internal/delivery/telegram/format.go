@@ -20,6 +20,10 @@ func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo, date string) stri
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "### %s - %s\n", date, escapeHTML(region))
+	if info.HasLeadApplications {
+		l := info.LeadApplications
+		fmt.Fprintf(&sb, "- %d заявок с сайта (сегодня: %d, вчера: %d)\n", l.Total, l.Today, l.Yesterday)
+	}
 	fmt.Fprintf(&sb, "- %d заявок\n", info.SignedUpWithoutOnboarding)
 	fmt.Fprintf(&sb, "- %d прошли игры\n", info.SucceededOnboardingGames)
 	writeRegionMetric(&sb, info, domain.EventCheckin, info.CheckinRegistrations, "reg на check-in")

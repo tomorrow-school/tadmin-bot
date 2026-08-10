@@ -15,6 +15,7 @@ import (
 	"admin-bot/internal/config"
 	"admin-bot/internal/domain"
 	"admin-bot/internal/infra/accessstore"
+	"admin-bot/internal/infra/apply"
 	"admin-bot/internal/infra/oneedu"
 	"admin-bot/internal/infra/scheduler"
 	"admin-bot/internal/infra/sheets"
@@ -88,8 +89,18 @@ func main() {
 		strategy.NewRustStrategy(),
 	}
 
+	// Lead client is optional: only build it when both the apply URL and token are
+	// configured, otherwise /get_region_updates simply omits the lead line.
+	var leadClient domain.LeadClient
+	if cfg.ApplyBaseURL != "" && cfg.ApplyAccessToken != "" {
+		leadClient = apply.NewClient(cfg.ApplyBaseURL, cfg.ApplyAccessToken, loc, logger)
+		logger.Info("apply lead client initialized", "url", cfg.ApplyBaseURL)
+	} else {
+		logger.Warn("APPLY_BASE_URL/APPLY_ACCESS_TOKEN not set — region lead counts unavailable")
+	}
+
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
-	updatesUC := usecase.NewUpdatesUseCase(eduClient, cfg.RegionEvents)
+	updatesUC := usecase.NewUpdatesUseCase(eduClient, cfg.RegionEvents, leadClient)
 
 	// Access store: fail-closed. If it can't load we exit rather than silently
 	// running with an empty allowlist (which would deny every non-super-admin).

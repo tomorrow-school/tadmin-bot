@@ -89,6 +89,8 @@ cp .env.example .env
 | `TELEGRAM_TOKEN` | да | Токен Telegram-бота |
 | `ONEEDU_BASE_URL` | да | URL платформы 01-edu (например `01.tomorrow-school.ai`); схема `https://` подставляется автоматически |
 | `PLATFORM_ACCESS_TOKEN` | да | Access token для 01-edu API |
+| `APPLY_BASE_URL` | нет | URL сайта заявок (например `apply.tomorrow-school.ai`); при заданных `APPLY_BASE_URL` **и** `APPLY_ACCESS_TOKEN` в `/get_region_updates` добавляется строка «заявок с сайта (сегодня / вчера)» по каждому городу — данные из `/api/export.json`, дни считаются в часовом поясе `TIMEZONE` |
+| `APPLY_ACCESS_TOKEN` | нет | Bearer-токен для API сайта заявок |
 | `CHAT_IDS` | да | ID чатов-получателей рассылки через запятую (например `-100123456789,-100987654321`) |
 | `SUPER_ADMIN_USER_ID` | да | Единственный user ID, который принимает запросы доступа и жмёт Approve/Reject. Всегда авторизован |
 | `ADMIN_USER_IDS` | нет | Список user ID через запятую, предодобряемых при первом старте (готовый allowlist) |

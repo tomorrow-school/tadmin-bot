@@ -38,6 +38,12 @@ type Config struct {
 	OneEduBaseURL     string
 	OneEduAccessToken string
 
+	// Apply/leadform site (optional). When both are set, /get_region_updates
+	// reports the per-campus application count (заявки с сайта) fetched from
+	// APPLY_BASE_URL/api/export.json. Leaving either blank disables the lead line.
+	ApplyBaseURL     string
+	ApplyAccessToken string
+
 	// Templates
 	TemplatesPath string
 
@@ -124,6 +130,18 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Apply/leadform site is optional. Both the URL and the token must be present
+	// for the lead line to be enabled; if a URL is given it must be https:// (the
+	// same insecure opt-out as the platform token) since it carries a bearer token.
+	applyURL := strings.TrimSpace(os.Getenv("APPLY_BASE_URL"))
+	if applyURL != "" {
+		applyURL = ensureScheme(applyURL)
+		if strings.HasPrefix(applyURL, "http://") && os.Getenv("APPLY_ALLOW_INSECURE") != "1" {
+			return nil, fmt.Errorf("APPLY_BASE_URL must use https:// (set APPLY_ALLOW_INSECURE=1 to override for local dev)")
+		}
+	}
+	applyToken := strings.TrimSpace(os.Getenv("APPLY_ACCESS_TOKEN"))
+
 	chatIDs, err := parseChatIDs(os.Getenv("CHAT_IDS"))
 	if err != nil {
 		return nil, fmt.Errorf("CHAT_IDS: %w", err)
@@ -178,6 +196,8 @@ func Load() (*Config, error) {
 		AccessStorePath:       envOr("ACCESS_STORE_PATH", "data/access.json"),
 		OneEduBaseURL:         eduURL,
 		OneEduAccessToken:     eduToken,
+		ApplyBaseURL:          applyURL,
+		ApplyAccessToken:      applyToken,
 		TemplatesPath:         envOr("TEMPLATES_PATH", "messages"),
 		Timezone:              envOr("TIMEZONE", "Asia/Almaty"),
 		GoogleCredentialsFile: os.Getenv("GOOGLE_CREDENTIALS_FILE"),

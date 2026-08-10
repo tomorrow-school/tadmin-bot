@@ -287,6 +287,28 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 	}
 }
 
+// TestFormatRegionUpdatesMessage_LeadApplications verifies the website-lead line
+// is shown (with its own label, distinct from onboarding "заявок") only when the
+// lead data is flagged present.
+func TestFormatRegionUpdatesMessage_LeadApplications(t *testing.T) {
+	withLeads := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region:              "shymkent",
+		LeadApplications:    domain.LeadCounts{Total: 196, Today: 6, Yesterday: 12},
+		HasLeadApplications: true,
+	}, "02.07.2026")
+	if !strings.Contains(withLeads, "- 196 заявок с сайта (сегодня: 6, вчера: 12)\n") {
+		t.Errorf("lead line missing/incorrect when present:\n%s", withLeads)
+	}
+
+	// Absent lead data: no lead line, even though the field defaults to 0.
+	without := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region: "shymkent",
+	}, "02.07.2026")
+	if strings.Contains(without, "заявок с сайта") {
+		t.Errorf("lead line must be omitted when data absent:\n%s", without)
+	}
+}
+
 // TestFormatRegionUpdatesMessage_StaleEvent verifies a metric backed by a stale
 // pinned event (check-in) is shown as unavailable rather than as a (misleading)
 // count.
