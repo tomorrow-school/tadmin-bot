@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestAllPiscines(t *testing.T) {
 	got := AllPiscines()
@@ -208,6 +211,51 @@ func TestRaidWeekMap_WeeksMatchTotalMinusOne(t *testing.T) {
 			if week < 1 || week > maxWeek {
 				t.Errorf("%s: raid %q has week=%d, want 1..%d", p, name, week, maxWeek)
 			}
+		}
+	}
+}
+
+// TestRaidInfoStatusAt pins the window semantics, including the inclusive
+// boundaries — a raid is Active exactly at its start and end instants, matching
+// the active-raid lookup used by week detection.
+func TestRaidInfoStatusAt(t *testing.T) {
+	start := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 10, 18, 0, 0, 0, time.UTC)
+	raid := RaidInfo{StartDate: start, EndDate: end}
+
+	cases := []struct {
+		name string
+		now  time.Time
+		want RaidStatus
+	}{
+		{"before_start", start.Add(-time.Hour), RaidStatusUpcoming},
+		{"exactly_at_start", start, RaidStatusActive},
+		{"mid_raid", start.Add(24 * time.Hour), RaidStatusActive},
+		{"exactly_at_end", end, RaidStatusActive},
+		{"after_end", end.Add(time.Second), RaidStatusEnded},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := raid.StatusAt(tc.now); got != tc.want {
+				t.Errorf("StatusAt(%v) = %s, want %s", tc.now, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRaidStatusAllowsDefenseTable documents the rule the handlers rely on: a
+// defense table may only be built once the raid is under way or over.
+func TestRaidStatusAllowsDefenseTable(t *testing.T) {
+	cases := map[RaidStatus]bool{
+		RaidStatusNone:     false,
+		RaidStatusUpcoming: false,
+		RaidStatusActive:   true,
+		RaidStatusEnded:    true,
+	}
+	for status, want := range cases {
+		if got := status.AllowsDefenseTable(); got != want {
+			t.Errorf("%s.AllowsDefenseTable() = %v, want %v", status, got, want)
 		}
 	}
 }

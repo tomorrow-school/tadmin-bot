@@ -38,7 +38,16 @@ func NewRaidUseCase(
 type CurrentWeekInfo struct {
 	PiscineInfo *domain.PiscineInfo
 	WeekNumber  int
-	ActiveRaid  *domain.RaidInfo // nil on final week (no raid)
+
+	// ActiveRaid is the raid the week revolves around, or nil on the final week.
+	// CAUTION: a non-nil ActiveRaid does NOT mean the raid is running — between
+	// raids this is the next, not-yet-started one. Check RaidStatus before doing
+	// anything that assumes teams exist (e.g. building a defense table).
+	ActiveRaid *domain.RaidInfo
+
+	// RaidStatus distinguishes registration (Upcoming) from a running raid
+	// (Active) and a finished one (Ended). None means no raid at all.
+	RaidStatus domain.RaidStatus
 }
 
 // DetectCurrentWeek determines which week it is for a given piscine.
@@ -67,6 +76,7 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 			PiscineInfo: piscineInfo,
 			WeekNumber:  active.WeekNumber,
 			ActiveRaid:  active,
+			RaidStatus:  domain.RaidStatusActive,
 		}, nil
 	}
 
@@ -78,15 +88,19 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 			PiscineInfo: piscineInfo,
 			WeekNumber:  domain.TotalWeeks(piscine),
 			ActiveRaid:  nil,
+			RaidStatus:  domain.RaidStatusNone,
 		}, nil
 	}
 
-	// We're between raids; the upcoming raid tells us which week we're in.
+	// We're between raids; the upcoming raid tells us which week we're in. Its
+	// registration window is still open, hence RaidStatusUpcoming — the raid in
+	// ActiveRaid has NOT started.
 	if next := findNextUpcomingRaid(raids, now); next != nil {
 		return &CurrentWeekInfo{
 			PiscineInfo: piscineInfo,
 			WeekNumber:  next.WeekNumber,
 			ActiveRaid:  next,
+			RaidStatus:  domain.RaidStatusUpcoming,
 		}, nil
 	}
 
@@ -110,8 +124,12 @@ func (uc *RaidUseCase) GetUpcomingPiscines(ctx context.Context) ([]domain.Piscin
 // ordering of the event's raids, not a hardcoded raid-name map.
 type EventWeekInfo struct {
 	Event      domain.PiscineEvent
-	WeekNumber int              // 0 when the piscine has no raids at all
-	ActiveRaid *domain.RaidInfo // nil between raids, on the final week, or when there are no raids
+	WeekNumber int // 0 when the piscine has no raids at all
+
+	// ActiveRaid carries the same caveat as CurrentWeekInfo.ActiveRaid: between
+	// raids it holds the next, not-yet-started one. Consult RaidStatus.
+	ActiveRaid *domain.RaidInfo
+	RaidStatus domain.RaidStatus
 	HasRaids   bool
 }
 
@@ -127,7 +145,7 @@ func (uc *RaidUseCase) DetectCurrentWeekForEvent(ctx context.Context, event doma
 	}
 
 	if len(raids) == 0 {
-		return &EventWeekInfo{Event: event, WeekNumber: 0, HasRaids: false}, nil
+		return &EventWeekInfo{Event: event, WeekNumber: 0, HasRaids: false, RaidStatus: domain.RaidStatusNone}, nil
 	}
 
 	// Order defines the week number: earliest raid is week 1.
@@ -136,23 +154,36 @@ func (uc *RaidUseCase) DetectCurrentWeekForEvent(ctx context.Context, event doma
 	now := time.Now()
 
 	if active := findActiveRaid(raids, now); active != nil {
-		return &EventWeekInfo{Event: event, WeekNumber: active.WeekNumber, ActiveRaid: active, HasRaids: true}, nil
+		return &EventWeekInfo{
+			Event: event, WeekNumber: active.WeekNumber, ActiveRaid: active,
+			RaidStatus: domain.RaidStatusActive, HasRaids: true,
+		}, nil
 	}
 
 	// No active raid. If every raid has ended, we're on the final-exam week,
 	// numbered one past the last raid.
 	if countEndedRaids(raids, now) >= len(raids) {
-		return &EventWeekInfo{Event: event, WeekNumber: len(raids) + 1, ActiveRaid: nil, HasRaids: true}, nil
+		return &EventWeekInfo{
+			Event: event, WeekNumber: len(raids) + 1, ActiveRaid: nil,
+			RaidStatus: domain.RaidStatusNone, HasRaids: true,
+		}, nil
 	}
 
-	// Between raids: the next upcoming raid tells us the week.
+	// Between raids: the next upcoming raid tells us the week. Registration is
+	// still open, so the status is Upcoming, not Active.
 	if next := findNextUpcomingRaid(raids, now); next != nil {
-		return &EventWeekInfo{Event: event, WeekNumber: next.WeekNumber, ActiveRaid: next, HasRaids: true}, nil
+		return &EventWeekInfo{
+			Event: event, WeekNumber: next.WeekNumber, ActiveRaid: next,
+			RaidStatus: domain.RaidStatusUpcoming, HasRaids: true,
+		}, nil
 	}
 
 	// Shouldn't happen (not active, not all ended, none upcoming), but fall back
 	// to week 1 rather than erroring on a discovered piscine.
-	return &EventWeekInfo{Event: event, WeekNumber: 1, ActiveRaid: nil, HasRaids: true}, nil
+	return &EventWeekInfo{
+		Event: event, WeekNumber: 1, ActiveRaid: nil,
+		RaidStatus: domain.RaidStatusNone, HasRaids: true,
+	}, nil
 }
 
 // ListRaidsWithWeeks returns every raid of a named piscine's current active
@@ -311,6 +342,12 @@ func (uc *RaidUseCase) BuildDefenseReminder(
 
 	if weekInfo.ActiveRaid == nil {
 		return "", nil, fmt.Errorf("no active raid for defense reminder")
+	}
+	// During the registration window ActiveRaid holds the NEXT raid, which has no
+	// teams yet — reminding admins to build its defense table would be premature.
+	if !weekInfo.RaidStatus.AllowsDefenseTable() {
+		return "", nil, fmt.Errorf("raid %q has not started yet (%s)",
+			weekInfo.ActiveRaid.RaidName, weekInfo.RaidStatus)
 	}
 
 	raid := weekInfo.ActiveRaid

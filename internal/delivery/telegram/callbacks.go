@@ -47,6 +47,16 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
+	// Same rule as /create_tables: no defense table while registration is open.
+	if !weekInfo.RaidStatus.AllowsDefenseTable() {
+		h.logger.Info("skip table update: raid not started", "piscine", piscine,
+			"raid", weekInfo.ActiveRaid.RaidName, "status", weekInfo.RaidStatus)
+		_ = h.adapter.SendMessage(ctx, chatID,
+			notStartedLine(domain.PiscineType(piscine), weekInfo.ActiveRaid)+
+				"\n\nЕсли таблица нужна заранее — используйте /edit_tables.")
+		return
+	}
+
 	spreadsheetID, dedicated := h.resolveSpreadsheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
 	if spreadsheetID == "" {
 		h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)

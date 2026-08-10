@@ -105,6 +105,11 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 		raidName := "—"
 		if weekInfo.ActiveRaid != nil && weekInfo.ActiveRaid.RaidName != "" {
 			raidName = weekInfo.ActiveRaid.RaidName
+			// Mark a raid that is still in registration, so "Рейд: X" is not read
+			// as "X is running now".
+			if weekInfo.RaidStatus == domain.RaidStatusUpcoming {
+				raidName += " (скоро старт)"
+			}
 		}
 
 		fmt.Fprintf(&sb, "📌 <b>%s</b> (id %d): Неделя %d | Рейд: %s\n",
@@ -145,6 +150,16 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 
 		if weekInfo.ActiveRaid == nil {
 			h.logger.Info("skip: no active raid", "piscine", piscine)
+			continue
+		}
+
+		// Registration window: ActiveRaid holds the NEXT raid, which has no teams
+		// yet, so there is nothing to schedule. Say so instead of silently writing
+		// a table for a raid that hasn't started.
+		if !weekInfo.RaidStatus.AllowsDefenseTable() {
+			h.logger.Info("skip: raid not started", "piscine", piscine,
+				"raid", weekInfo.ActiveRaid.RaidName, "status", weekInfo.RaidStatus)
+			lines = append(lines, notStartedLine(piscine, weekInfo.ActiveRaid))
 			continue
 		}
 
@@ -335,13 +350,21 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 	}
 
 	raid := weekInfo.ActiveRaid
+	// The raid may still be in its registration window, in which case it is the
+	// NEXT raid rather than a running one — label it so, otherwise the message
+	// reads as if defenses were already being scheduled.
+	status := "⚔️ Рейд"
+	if weekInfo.RaidStatus == domain.RaidStatusUpcoming {
+		status = "⏳ Рейд (ещё не начался)"
+	}
 	text := fmt.Sprintf(
 		"📌 <b>%s</b> — Неделя %d\n"+
-			"⚔️ Рейд: <b>%s</b>\n"+
+			"%s: <b>%s</b>\n"+
 			"👥 Команд: %d\n"+
 			"📅 %s — %s",
 		escapeHTML(string(piscine)),
 		weekInfo.WeekNumber,
+		status,
 		escapeHTML(raid.RaidName),
 		raid.TeamsCount,
 		raid.StartDate.Format("02.01 15:04"),
@@ -351,6 +374,15 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send raid info failed", "err", err)
 	}
+}
+
+// notStartedLine explains why a piscine was skipped during its registration
+// window. The raid start date is included so the admin knows when to retry.
+func notStartedLine(piscine domain.PiscineType, raid *domain.RaidInfo) string {
+	return fmt.Sprintf(
+		"⏳ %s — рейд «%s» ещё не начался (старт %s), таблицу защит создавать рано.",
+		escapeHTML(string(piscine)), escapeHTML(raid.RaidName), raid.StartDate.Format("02.01 15:04"),
+	)
 }
 
 func (h *Handler) updateTableForActiveRaid(ctx context.Context, spreadsheetID string, raid *domain.RaidInfo, defenseDate time.Time) (string, error) {
