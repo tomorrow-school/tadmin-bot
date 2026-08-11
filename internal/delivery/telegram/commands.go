@@ -35,6 +35,8 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/create_tables {бассейн} — обновить таблицу защит одного бассейна (go, js, ai1, ai2, ai3, rust)\n" +
 		"/create_tables — обновить таблицы защит всех бассейнов с идущим рейдом\n" +
 		"/edit_tables — создать/обновить таблицу защиты с ручными параметрами\n" +
+		"/announce — отправить анонс подписчикам выбранного бассейна\n" +
+		"/subscribe — включить/отключить анонсы и выбрать бассейны\n" +
 		"/get_region_updates — статистика обновлений по всем регионам\n" +
 		"/get_astana_updates — статистика обновлений Astana\n" +
 		"/get_event {id} — информация об ивенте (участники, регистрация, даты)\n"

@@ -19,6 +19,7 @@ type Handler struct {
 	raidUC           *usecase.RaidUseCase
 	updatesUC        *usecase.UpdatesUseCase
 	accessUC         *usecase.AccessUseCase
+	announceUC       *usecase.AnnounceUseCase // nil if the subscription store failed to load
 	adapter          *tgAdapter.Adapter
 	sheets           *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs         map[domain.PiscineType]map[int]string
@@ -29,6 +30,7 @@ type Handler struct {
 	superAdminID     int64               // the single user who approves/rejects access requests
 	loc              *time.Location      // configured timezone, used for date arithmetic
 	editSessions     *editSessionStore   // in-memory /edit_tables dialog state, keyed by chat
+	announceSessions *announceSessionStore
 	logger           *slog.Logger
 }
 
@@ -48,6 +50,7 @@ func NewHandler(
 	raidUC *usecase.RaidUseCase,
 	updatesUC *usecase.UpdatesUseCase,
 	accessUC *usecase.AccessUseCase,
+	announceUC *usecase.AnnounceUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
@@ -70,6 +73,7 @@ func NewHandler(
 		raidUC:           raidUC,
 		updatesUC:        updatesUC,
 		accessUC:         accessUC,
+		announceUC:       announceUC,
 		adapter:          adapter,
 		sheets:           sheetsClient,
 		sheetIDs:         sheetIDs,
@@ -80,6 +84,7 @@ func NewHandler(
 		superAdminID:     superAdminID,
 		loc:              loc,
 		editSessions:     newEditSessionStore(),
+		announceSessions: newAnnounceSessionStore(),
 		logger:           logger,
 	}
 }

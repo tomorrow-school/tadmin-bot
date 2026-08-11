@@ -123,6 +123,25 @@ func (a *Adapter) EditMessageText(ctx context.Context, chatID int64, messageID i
 	return nil
 }
 
+// EditMessageWithKeyboard replaces both the text and the inline keyboard of an
+// existing message. The /subscribe screen uses it so toggling a piscine updates
+// the message in place instead of pushing a new one into the chat.
+func (a *Adapter) EditMessageWithKeyboard(ctx context.Context, chatID int64, messageID int, text string, keyboard *models.InlineKeyboardMarkup) error {
+	_, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:      chatID,
+		MessageID:   messageID,
+		Text:        text,
+		ParseMode:   models.ParseModeHTML,
+		ReplyMarkup: keyboard,
+	})
+	if err != nil {
+		err = a.scrub(err)
+		a.logger.Error("telegram edit with keyboard failed", "chat_id", chatID, "message_id", messageID, "err", err)
+		return fmt.Errorf("edit message with keyboard: %w", err)
+	}
+	return nil
+}
+
 // Start begins long-polling for updates.
 func (a *Adapter) Start(ctx context.Context) {
 	a.bot.Start(ctx)

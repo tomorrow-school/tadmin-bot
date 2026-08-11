@@ -52,7 +52,8 @@ func (h *Handler) HandleEditTables(ctx context.Context, b *bot.Bot, update *mode
 	}
 }
 
-// HandleCancel aborts an active /edit_tables dialog in the chat.
+// HandleCancel aborts whichever dialog is active in the chat (/edit_tables or
+// /announce).
 func (h *Handler) HandleCancel(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID, ok := h.guard(ctx, update)
 	if !ok {
@@ -60,6 +61,10 @@ func (h *Handler) HandleCancel(ctx context.Context, b *bot.Bot, update *models.U
 	}
 	if h.editSessions.clear(chatID) {
 		_ = h.adapter.SendMessage(ctx, chatID, "❌ Диалог настройки таблицы отменён.")
+		return
+	}
+	if h.announceSessions.clear(chatID) {
+		_ = h.adapter.SendMessage(ctx, chatID, "❌ Анонс отменён, ничего не отправлено.")
 		return
 	}
 	_ = h.adapter.SendMessage(ctx, chatID, "ℹ️ Нет активного диалога для отмены.")

@@ -17,12 +17,15 @@ const jobTimeout = 5 * time.Minute
 
 // CronScheduler sends announcements at specific days/times using cron expressions.
 type CronScheduler struct {
-	cron      *cron.Cron
-	raidUC    *usecase.RaidUseCase
-	sender    domain.BotSender
-	chatIDs   []int64
-	sheetURLs map[domain.PiscineType]map[int]string
-	logger    *slog.Logger
+	cron   *cron.Cron
+	raidUC *usecase.RaidUseCase
+	// announceUC delivers the same scheduled announcements to individual
+	// subscribers of the piscine, on top of the group chats. nil disables that.
+	announceUC *usecase.AnnounceUseCase
+	sender     domain.BotSender
+	chatIDs    []int64
+	sheetURLs  map[domain.PiscineType]map[int]string
+	logger     *slog.Logger
 
 	// baseCtx is canceled by Stop(); each job derives a timeout context from it
 	// so in-flight work unwinds on shutdown.
@@ -34,6 +37,7 @@ type CronScheduler struct {
 
 func NewCronScheduler(
 	raidUC *usecase.RaidUseCase,
+	announceUC *usecase.AnnounceUseCase,
 	sender domain.BotSender,
 	chatIDs []int64,
 	timezone string,
@@ -49,14 +53,15 @@ func NewCronScheduler(
 	baseCtx, cancel := context.WithCancel(context.Background())
 
 	s := &CronScheduler{
-		cron:      cron.New(cron.WithLocation(loc)),
-		raidUC:    raidUC,
-		sender:    sender,
-		chatIDs:   chatIDs,
-		sheetURLs: sheetURLs,
-		logger:    logger,
-		baseCtx:   baseCtx,
-		cancel:    cancel,
+		cron:       cron.New(cron.WithLocation(loc)),
+		raidUC:     raidUC,
+		announceUC: announceUC,
+		sender:     sender,
+		chatIDs:    chatIDs,
+		sheetURLs:  sheetURLs,
+		logger:     logger,
+		baseCtx:    baseCtx,
+		cancel:     cancel,
 	}
 	s.registerJobs()
 	return s
@@ -106,6 +111,28 @@ func (s *CronScheduler) broadcastMessage(msgType domain.MessageType, extra map[s
 			continue
 		}
 		s.sendToAll(ctx, piscine, msgType, text)
+		s.sendToSubscribers(ctx, piscine, msgType, text)
+	}
+}
+
+// sendToSubscribers delivers a scheduled announcement to the users who follow
+// this piscine via /subscribe, in addition to the configured group chats. Errors
+// are logged, never propagated: a failed personal delivery must not affect the
+// rest of the job.
+func (s *CronScheduler) sendToSubscribers(ctx context.Context, piscine domain.PiscineType, msgType domain.MessageType, text string) {
+	if s.announceUC == nil {
+		return
+	}
+	report, err := s.announceUC.Broadcast(ctx, piscine, text)
+	if err != nil {
+		s.logger.Error("scheduled announcement to subscribers failed",
+			"piscine", piscine, "type", msgType, "sent", report.Sent, "err", err)
+		return
+	}
+	if report.Recipients > 0 {
+		s.logger.Info("scheduled announcement delivered to subscribers",
+			"piscine", piscine, "type", msgType,
+			"recipients", report.Recipients, "sent", report.Sent, "failed", report.Failed())
 	}
 }
 

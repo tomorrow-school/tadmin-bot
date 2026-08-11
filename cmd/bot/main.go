@@ -20,6 +20,7 @@ import (
 	"admin-bot/internal/infra/oneedu"
 	"admin-bot/internal/infra/scheduler"
 	"admin-bot/internal/infra/sheets"
+	"admin-bot/internal/infra/substore"
 	"admin-bot/internal/infra/telegram"
 	"admin-bot/internal/infra/templates"
 	"admin-bot/internal/usecase"
@@ -142,10 +143,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Announcement subscriptions ("user → piscines"). Unlike the access store this
+	// is not security-critical: if it can't be loaded the bot keeps running with
+	// /announce and /subscribe disabled rather than refusing to start.
+	var announceUC *usecase.AnnounceUseCase
+	if subStore, err := substore.New(cfg.SubscriptionStorePath); err != nil {
+		logger.Error("failed to load subscription store (announcements disabled)",
+			"path", cfg.SubscriptionStorePath, "err", err)
+	} else {
+		announceUC = usecase.NewAnnounceUseCase(subStore, tgAdapter, logger)
+		logger.Info("subscription store loaded", "path", cfg.SubscriptionStorePath)
+	}
+
 	handler := delivery.NewHandler(
 		raidUC,
 		updatesUC,
 		accessUC,
+		announceUC,
 		tgAdapter,
 		sheetsClient,
 		cfg.SheetIDs,
@@ -159,7 +173,7 @@ func main() {
 	)
 	delivery.RegisterHandlers(tgAdapter.Bot(), handler)
 
-	sched := scheduler.NewCronScheduler(raidUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, cfg.SheetURLs, logger)
+	sched := scheduler.NewCronScheduler(raidUC, announceUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, cfg.SheetURLs, logger)
 	sched.DefenseCallback = handler.SendDefenseReminderWithKeyboard
 	sched.Start()
 

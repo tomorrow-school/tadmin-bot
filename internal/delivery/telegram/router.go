@@ -25,6 +25,8 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/create_tables", bot.MatchTypePrefix, h.HandleTables)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/edit_tables", bot.MatchTypeExact, h.HandleEditTables)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/cancel", bot.MatchTypeExact, h.HandleCancel)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/subscribe", bot.MatchTypeExact, h.HandleSubscribe)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/announce", bot.MatchTypeExact, h.HandleAnnounce)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/get_astana_updates", bot.MatchTypeExact, h.HandleAstanaUpdates)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/get_region_updates", bot.MatchTypeExact, h.HandleRegionUpdates)
 	// /get_event carries an argument (the event ID), so it must match by prefix.
@@ -49,6 +51,14 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbEditSlot, bot.MatchTypePrefix, h.HandleCallbackEditSlot)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbEditBreaks, bot.MatchTypePrefix, h.HandleCallbackEditBreaks)
 
+	// Announcement flows. "sub_toggle" is exact and does not overlap the
+	// "sub_piscine:" prefix; same for the /announce send/cancel buttons.
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbSubToggle, bot.MatchTypeExact, h.HandleCallbackSubToggle)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbSubPiscine, bot.MatchTypePrefix, h.HandleCallbackSubPiscine)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnSend, bot.MatchTypeExact, h.HandleCallbackAnnounceSend)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnCancel, bot.MatchTypeExact, h.HandleCallbackAnnounceCancel)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnPiscine, bot.MatchTypePrefix, h.HandleCallbackAnnouncePiscine)
+
 	// Access-request decisions (super-admin only; enforced in the handlers).
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "access_approve:", bot.MatchTypePrefix, h.HandleCallbackAccessApprove)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "access_reject:", bot.MatchTypePrefix, h.HandleCallbackAccessReject)
@@ -60,13 +70,24 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	// last: findHandler returns the first matching handler, so exact commands
 	// and callback handlers above always win.
 	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
-		if update.Message == nil {
-			return false
-		}
-		text := update.Message.Text
-		if text == "" || strings.HasPrefix(text, "/") {
-			return false
-		}
-		return h.editSessions.awaitingText(update.Message.Chat.ID)
+		return awaitsDialogText(update) && h.editSessions.awaitingText(update.Message.Chat.ID)
 	}, h.HandleEditText)
+
+	// Same arrangement for the /announce body. The two predicates are mutually
+	// exclusive in practice (a chat is in at most one dialog at a time) and each
+	// only fires while its own dialog awaits text.
+	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+		return awaitsDialogText(update) && h.announceSessions.awaitingText(update.Message.Chat.ID)
+	}, h.HandleAnnounceText)
+}
+
+// awaitsDialogText reports whether an update is ordinary text that a dialog could
+// consume: a non-empty message that is not a command (so /cancel and friends
+// still reach their own handlers).
+func awaitsDialogText(update *models.Update) bool {
+	if update.Message == nil {
+		return false
+	}
+	text := update.Message.Text
+	return text != "" && !strings.HasPrefix(text, "/")
 }

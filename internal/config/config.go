@@ -35,6 +35,11 @@ type Config struct {
 	// AccessStorePath is where the JSON access store lives (ACCESS_STORE_PATH).
 	AccessStorePath string
 
+	// SubscriptionStorePath is where the JSON announcement-subscription store
+	// lives (SUBSCRIPTION_STORE_PATH). It holds "user → piscines + on/off" for
+	// /announce and the scheduled announcements.
+	SubscriptionStorePath string
+
 	// 01-edu
 	OneEduBaseURL     string
 	OneEduAccessToken string
@@ -207,6 +212,7 @@ func Load() (*Config, error) {
 		SuperAdminID:          superAdminID,
 		AdminUserIDs:          adminUserIDs,
 		AccessStorePath:       envOr("ACCESS_STORE_PATH", "data/access.json"),
+		SubscriptionStorePath: envOr("SUBSCRIPTION_STORE_PATH", "data/subscriptions.json"),
 		OneEduBaseURL:         eduURL,
 		OneEduAccessToken:     eduToken,
 		ApplyBaseURL:          applyURL,
