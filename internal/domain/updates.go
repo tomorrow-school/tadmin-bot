@@ -23,6 +23,15 @@ type PiscineRegistrationCount struct {
 	StartAt  time.Time // start of the (earliest) event for this path; used for upcoming
 }
 
+// LeadCounts holds application (lead) counts for a campus: the all-time total
+// and the number submitted today and yesterday, bucketed by the configured
+// timezone.
+type LeadCounts struct {
+	Total     int
+	Today     int
+	Yesterday int
+}
+
 type RegionUpdatesInfo struct {
 	Region                    string
 	SignedUpWithoutOnboarding int
@@ -33,6 +42,18 @@ type RegionUpdatesInfo struct {
 	// hardcoded piscinego path.
 	PiscineRegistrations []PiscineRegistrationCount
 	CoreUsers            int
+
+	// LeadApplications holds the application (заявки) counts submitted for this
+	// campus through the public apply/leadform site (apply.tomorrow-school.ai):
+	// all-time total plus today's and yesterday's submissions. Meaningful only
+	// when HasLeadApplications is true; a campus with no submissions legitimately
+	// reports zeros.
+	LeadApplications LeadCounts
+	// HasLeadApplications reports whether lead data was successfully fetched for
+	// this run. When false (lead client unconfigured or the fetch failed) the
+	// LeadApplications counts are not trustworthy and callers should omit them
+	// rather than show misleading zeros.
+	HasLeadApplications bool
 
 	// StaleEvents lists pinned events (see RegionUpdateEventsConfig) that were
 	// resolved but failed verification — they do not exist, belong to another

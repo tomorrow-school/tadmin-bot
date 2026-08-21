@@ -19,15 +19,17 @@ type Handler struct {
 	raidUC           *usecase.RaidUseCase
 	updatesUC        *usecase.UpdatesUseCase
 	accessUC         *usecase.AccessUseCase
+	announceUC       *usecase.AnnounceUseCase // nil if the subscription store failed to load
 	adapter          *tgAdapter.Adapter
 	sheets           *sheets.Client // nil if Google Sheets is not configured
 	sheetIDs         map[domain.PiscineType]map[int]string
 	sheetURLs        map[domain.PiscineType]map[int]string
-	universalSheetID string            // shared fallback table for RUST / "other" pools
-	authorized       map[int64]bool    // allowlist of group chat IDs permitted to issue commands
-	superAdminID     int64             // the single user who approves/rejects access requests
-	loc              *time.Location    // configured timezone, used for date arithmetic
-	editSessions     *editSessionStore // in-memory /edit_tables dialog state, keyed by chat
+	sheetSlots       map[string][]string // spreadsheet ID → SHEET_* names pointing at it
+	universalSheetID string              // shared fallback table for RUST / "other" pools
+	authorized       map[int64]bool      // allowlist of group chat IDs permitted to issue commands
+	superAdminID     int64               // the single user who approves/rejects access requests
+	loc              *time.Location      // configured timezone, used for date arithmetic
+	editSessions     *editSessionStore   // in-memory /edit_tables dialog state, keyed by chat
 	logger           *slog.Logger
 }
 
@@ -47,10 +49,12 @@ func NewHandler(
 	raidUC *usecase.RaidUseCase,
 	updatesUC *usecase.UpdatesUseCase,
 	accessUC *usecase.AccessUseCase,
+	announceUC *usecase.AnnounceUseCase,
 	adapter *tgAdapter.Adapter,
 	sheetsClient *sheets.Client,
 	sheetIDs map[domain.PiscineType]map[int]string,
 	sheetURLs map[domain.PiscineType]map[int]string,
+	sheetSlots map[string][]string,
 	universalSheetID string,
 	authorizedChatIDs []int64,
 	superAdminID int64,
@@ -68,10 +72,12 @@ func NewHandler(
 		raidUC:           raidUC,
 		updatesUC:        updatesUC,
 		accessUC:         accessUC,
+		announceUC:       announceUC,
 		adapter:          adapter,
 		sheets:           sheetsClient,
 		sheetIDs:         sheetIDs,
 		sheetURLs:        sheetURLs,
+		sheetSlots:       sheetSlots,
 		universalSheetID: universalSheetID,
 		authorized:       allow,
 		superAdminID:     superAdminID,
@@ -158,6 +164,23 @@ func (h *Handler) resolveSpreadsheetID(piscine domain.PiscineType, week int) (id
 		return h.lookupSheetID(piscine, week), true
 	}
 	return h.universalSheetID, false
+}
+
+// sheetURLFor returns the link to the defense table students sign up in: the
+// piscine's own per-week document, or the shared universal one for the pools
+// that have no dedicated sheet. Empty when nothing is configured — callers say
+// so rather than sending a broken link.
+func (h *Handler) sheetURLFor(piscine domain.PiscineType, week int) string {
+	// Mirror resolveSpreadsheetID: a dedicated piscine links ONLY its own
+	// per-week document. Falling back to the universal table here would hand
+	// students a link to some other pool's schedule.
+	if isDedicatedPiscine(piscine) {
+		return h.sheetURLs[piscine][week]
+	}
+	if h.universalSheetID != "" {
+		return "https://docs.google.com/spreadsheets/d/" + h.universalSheetID + "/edit"
+	}
+	return ""
 }
 
 // now returns the current time in the configured location.

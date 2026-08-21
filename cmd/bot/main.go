@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -15,9 +16,11 @@ import (
 	"admin-bot/internal/config"
 	"admin-bot/internal/domain"
 	"admin-bot/internal/infra/accessstore"
+	"admin-bot/internal/infra/apply"
 	"admin-bot/internal/infra/oneedu"
 	"admin-bot/internal/infra/scheduler"
 	"admin-bot/internal/infra/sheets"
+	"admin-bot/internal/infra/substore"
 	"admin-bot/internal/infra/telegram"
 	"admin-bot/internal/infra/templates"
 	"admin-bot/internal/usecase"
@@ -55,6 +58,15 @@ func main() {
 		logger.Warn("no ADMIN_CHAT_IDS/CHAT_IDS configured — bot will reject ALL commands (fail-closed)")
 	}
 
+	// Two SHEET_* slots pointing at one document mean the defense table of one
+	// week/piscine is overwritten by the other. That is a configuration mistake
+	// the bot cannot fix on its own, so surface it loudly at startup — the
+	// /create_tables reply repeats the warning when it actually writes.
+	for id, slots := range cfg.DuplicateSheetSlots() {
+		logger.Warn("several SHEET_* variables point at the same spreadsheet — their defense tables will overwrite each other",
+			"spreadsheet_id", id, "slots", strings.Join(slots, ", "))
+	}
+
 	// Resolve the configured timezone once so date arithmetic (nextMonday) is
 	// consistent with the cron schedule rather than the container's UTC clock.
 	loc, err := time.LoadLocation(cfg.Timezone)
@@ -88,8 +100,18 @@ func main() {
 		strategy.NewRustStrategy(),
 	}
 
+	// Lead client is optional: only build it when both the apply URL and token are
+	// configured, otherwise /get_region_updates simply omits the lead line.
+	var leadClient domain.LeadClient
+	if cfg.ApplyBaseURL != "" && cfg.ApplyAccessToken != "" {
+		leadClient = apply.NewClient(cfg.ApplyBaseURL, cfg.ApplyAccessToken, loc, logger)
+		logger.Info("apply lead client initialized", "url", cfg.ApplyBaseURL)
+	} else {
+		logger.Warn("APPLY_BASE_URL/APPLY_ACCESS_TOKEN not set — region lead counts unavailable")
+	}
+
 	raidUC := usecase.NewRaidUseCase(eduClient, tmplLoader, strategies)
-	updatesUC := usecase.NewUpdatesUseCase(eduClient, cfg.RegionEvents)
+	updatesUC := usecase.NewUpdatesUseCase(eduClient, cfg.RegionEvents, leadClient)
 
 	// Access store: fail-closed. If it can't load we exit rather than silently
 	// running with an empty allowlist (which would deny every non-super-admin).
@@ -121,14 +143,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Announcement subscriptions ("user → piscines"). Unlike the access store this
+	// is not security-critical: if it can't be loaded the bot keeps running with
+	// /announce and /subscribe disabled rather than refusing to start.
+	var announceUC *usecase.AnnounceUseCase
+	if subStore, err := substore.New(cfg.SubscriptionStorePath); err != nil {
+		logger.Error("failed to load subscription store (announcements disabled)",
+			"path", cfg.SubscriptionStorePath, "err", err)
+	} else {
+		announceUC = usecase.NewAnnounceUseCase(subStore, tgAdapter, logger)
+		logger.Info("subscription store loaded", "path", cfg.SubscriptionStorePath)
+	}
+
 	handler := delivery.NewHandler(
 		raidUC,
 		updatesUC,
 		accessUC,
+		announceUC,
 		tgAdapter,
 		sheetsClient,
 		cfg.SheetIDs,
 		cfg.SheetURLs,
+		cfg.SheetSlots,
 		cfg.UniversalSheetID,
 		cfg.AdminChatIDs,
 		cfg.SuperAdminID,
@@ -137,7 +173,7 @@ func main() {
 	)
 	delivery.RegisterHandlers(tgAdapter.Bot(), handler)
 
-	sched := scheduler.NewCronScheduler(raidUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, cfg.SheetURLs, logger)
+	sched := scheduler.NewCronScheduler(raidUC, announceUC, tgAdapter, cfg.ChatIDs, cfg.Timezone, cfg.SheetURLs, logger)
 	sched.DefenseCallback = handler.SendDefenseReminderWithKeyboard
 	sched.Start()
 

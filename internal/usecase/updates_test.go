@@ -89,6 +89,126 @@ func (f *fakeUpdatesClient) GetRegionUpdates(ctx context.Context, campus string,
 	return f.stats[campus], nil
 }
 
+// fakeLeadClient is a stub domain.LeadClient for the usecase tests.
+type fakeLeadClient struct {
+	counts map[string]domain.LeadCounts
+	err    error
+	calls  int
+}
+
+func (f *fakeLeadClient) GetLeadCountsByCampus(ctx context.Context) (map[string]domain.LeadCounts, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.counts, nil
+}
+
+// TestUpdatesUseCaseGetRegionUpdates_AttachesLeadCounts verifies lead counts are
+// attached per campus (case-insensitively), that a campus absent from the map
+// reports 0 with the data flagged present, and that the lead client is called
+// exactly once for the whole report.
+func TestUpdatesUseCaseGetRegionUpdates_AttachesLeadCounts(t *testing.T) {
+	client := &fakeUpdatesClient{
+		campuses: []string{"Shymkent", "semey"},
+		stats: map[string]*domain.RegionUpdatesInfo{
+			"Shymkent": {Region: "Shymkent"},
+			"semey":    {Region: "semey"},
+		},
+	}
+	leads := &fakeLeadClient{counts: map[string]domain.LeadCounts{
+		"shymkent": {Total: 196, Today: 6, Yesterday: 12},
+	}}
+
+	report, err := NewUpdatesUseCase(client, nil, leads).GetRegionUpdates(context.Background())
+	if err != nil {
+		t.Fatalf("GetRegionUpdates: %v", err)
+	}
+	if leads.calls != 1 {
+		t.Errorf("lead client calls = %d, want 1 (fetched once per report)", leads.calls)
+	}
+
+	byRegion := map[string]domain.RegionUpdatesInfo{}
+	for _, r := range report.Regions {
+		byRegion[r.Region] = r
+	}
+
+	shymkent := byRegion["Shymkent"]
+	want := domain.LeadCounts{Total: 196, Today: 6, Yesterday: 12}
+	if !shymkent.HasLeadApplications || shymkent.LeadApplications != want {
+		t.Errorf("shymkent leads = %+v (has=%v), want %+v (has=true, case-insensitive)",
+			shymkent.LeadApplications, shymkent.HasLeadApplications, want)
+	}
+	// semey is absent from the map: zero submissions, but data is still present.
+	semey := byRegion["semey"]
+	if !semey.HasLeadApplications || semey.LeadApplications != (domain.LeadCounts{}) {
+		t.Errorf("semey leads = %+v (has=%v), want zeros (has=true)",
+			semey.LeadApplications, semey.HasLeadApplications)
+	}
+}
+
+// TestUpdatesUseCaseGetRegionUpdates_LeadFetchFailureIsBestEffort verifies a
+// lead fetch error does not fail the report; regions are returned with the lead
+// data flagged absent so the formatter omits the line.
+func TestUpdatesUseCaseGetRegionUpdates_LeadFetchFailureIsBestEffort(t *testing.T) {
+	client := &fakeUpdatesClient{
+		campuses: []string{"shymkent"},
+		stats:    map[string]*domain.RegionUpdatesInfo{"shymkent": {Region: "shymkent"}},
+	}
+	leads := &fakeLeadClient{err: errors.New("apply down")}
+
+	report, err := NewUpdatesUseCase(client, nil, leads).GetRegionUpdates(context.Background())
+	if err != nil {
+		t.Fatalf("GetRegionUpdates returned fatal error: %v", err)
+	}
+	if len(report.Regions) != 1 {
+		t.Fatalf("regions len = %d, want 1", len(report.Regions))
+	}
+	if report.Regions[0].HasLeadApplications {
+		t.Errorf("HasLeadApplications = true, want false when lead fetch fails")
+	}
+}
+
+// TestUpdatesUseCaseGetRegionUpdates_NoLeadClientOmitsLeads verifies that with
+// no lead client configured the report leaves lead data absent.
+func TestUpdatesUseCaseGetRegionUpdates_NoLeadClientOmitsLeads(t *testing.T) {
+	client := &fakeUpdatesClient{
+		campuses: []string{"shymkent"},
+		stats:    map[string]*domain.RegionUpdatesInfo{"shymkent": {Region: "shymkent"}},
+	}
+
+	report, err := NewUpdatesUseCase(client, nil, nil).GetRegionUpdates(context.Background())
+	if err != nil {
+		t.Fatalf("GetRegionUpdates: %v", err)
+	}
+	if report.Regions[0].HasLeadApplications {
+		t.Errorf("HasLeadApplications = true, want false with no lead client")
+	}
+}
+
+// TestUpdatesUseCaseGetRegionUpdates_CampusAliasMatchesLeads verifies the
+// 01-edu campus name "petropavlovsk" is matched to the apply campus_id
+// "petropavl" so its lead counts aren't lost to the naming mismatch.
+func TestUpdatesUseCaseGetRegionUpdates_CampusAliasMatchesLeads(t *testing.T) {
+	client := &fakeUpdatesClient{
+		campuses: []string{"petropavlovsk"},
+		stats:    map[string]*domain.RegionUpdatesInfo{"petropavlovsk": {Region: "petropavlovsk"}},
+	}
+	leads := &fakeLeadClient{counts: map[string]domain.LeadCounts{
+		"petropavl": {Total: 64, Today: 3, Yesterday: 8},
+	}}
+
+	report, err := NewUpdatesUseCase(client, nil, leads).GetRegionUpdates(context.Background())
+	if err != nil {
+		t.Fatalf("GetRegionUpdates: %v", err)
+	}
+	got := report.Regions[0].LeadApplications
+	want := domain.LeadCounts{Total: 64, Today: 3, Yesterday: 8}
+	if got != want {
+		t.Errorf("petropavlovsk leads = %+v, want %+v (alias to petropavl)", got, want)
+	}
+}
+
 func TestUpdatesUseCaseGetRegionUpdates_ContinuesAfterRegionError(t *testing.T) {
 	client := &fakeUpdatesClient{
 		campuses: []string{"shymkent", "semey"},
@@ -106,7 +226,7 @@ func TestUpdatesUseCaseGetRegionUpdates_ContinuesAfterRegionError(t *testing.T) 
 		},
 	}
 
-	report, err := NewUpdatesUseCase(client, nil).GetRegionUpdates(context.Background())
+	report, err := NewUpdatesUseCase(client, nil, nil).GetRegionUpdates(context.Background())
 	if err != nil {
 		t.Fatalf("GetRegionUpdates returned fatal error: %v", err)
 	}
@@ -129,7 +249,7 @@ func TestUpdatesUseCaseGetRegionUpdates_ContinuesAfterRegionError(t *testing.T) 
 }
 
 func TestUpdatesUseCaseGetRegionUpdates_EmptyCampuses(t *testing.T) {
-	_, err := NewUpdatesUseCase(&fakeUpdatesClient{}, nil).GetRegionUpdates(context.Background())
+	_, err := NewUpdatesUseCase(&fakeUpdatesClient{}, nil, nil).GetRegionUpdates(context.Background())
 	if !errors.Is(err, domain.ErrNoCampuses) {
 		t.Fatalf("error = %v, want ErrNoCampuses", err)
 	}
@@ -149,7 +269,7 @@ func TestUpdatesUseCaseGetRegionUpdates_PassesPinnedEvents(t *testing.T) {
 		"shymkent": {CheckinEventID: 111, PiscineEventID: 222, ModuleEventID: 333},
 	}
 
-	if _, err := NewUpdatesUseCase(client, regionEvents).GetRegionUpdates(context.Background()); err != nil {
+	if _, err := NewUpdatesUseCase(client, regionEvents, nil).GetRegionUpdates(context.Background()); err != nil {
 		t.Fatalf("GetRegionUpdates returned error: %v", err)
 	}
 
@@ -173,7 +293,7 @@ func TestUpdatesUseCaseGetRegionUpdates_ExcludesAstana(t *testing.T) {
 		},
 	}
 
-	report, err := NewUpdatesUseCase(client, nil).GetRegionUpdates(context.Background())
+	report, err := NewUpdatesUseCase(client, nil, nil).GetRegionUpdates(context.Background())
 	if err != nil {
 		t.Fatalf("GetRegionUpdates returned error: %v", err)
 	}
@@ -218,7 +338,7 @@ func TestPiscineRegistrations_DedupesSharedPathAndFiltersRegion(t *testing.T) {
 		},
 	}
 
-	uc := NewUpdatesUseCase(client, nil)
+	uc := NewUpdatesUseCase(client, nil, nil)
 	got := uc.piscineRegistrations(
 		context.Background(), "astanahub",
 		client.current, client.upcoming, time.Now(),

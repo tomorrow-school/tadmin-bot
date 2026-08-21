@@ -112,6 +112,46 @@ type Team struct {
 	Status  string
 }
 
+// RaidStatus says where a raid sits relative to a moment in time. It exists so
+// callers stop inferring "the raid is on" from a non-nil raid pointer: week
+// detection also reports the NEXT raid while its registration window is open,
+// and a defense table must not be generated then.
+type RaidStatus int
+
+const (
+	// RaidStatusNone means there is no raid to talk about at all (the piscine's
+	// final-exam week, or a piscine with no raid events).
+	RaidStatusNone RaidStatus = iota
+	// RaidStatusUpcoming means the raid has not started yet — registration is
+	// still open.
+	RaidStatusUpcoming
+	// RaidStatusActive means the raid is running right now.
+	RaidStatusActive
+	// RaidStatusEnded means the raid is over.
+	RaidStatusEnded
+)
+
+func (s RaidStatus) String() string {
+	switch s {
+	case RaidStatusUpcoming:
+		return "upcoming"
+	case RaidStatusActive:
+		return "active"
+	case RaidStatusEnded:
+		return "ended"
+	default:
+		return "none"
+	}
+}
+
+// AllowsDefenseTable reports whether a defense table may be generated for a raid
+// in this status. Teams only exist once the raid is under way, so the automatic
+// paths refuse during registration and build the table while the raid runs or
+// after it ends.
+func (s RaidStatus) AllowsDefenseTable() bool {
+	return s == RaidStatusActive || s == RaidStatusEnded
+}
+
 // RaidInfo is the aggregated data about a specific raid event.
 type RaidInfo struct {
 	Piscine    PiscineType
@@ -122,6 +162,20 @@ type RaidInfo struct {
 	Teams      []Team
 	StartDate  time.Time
 	EndDate    time.Time
+}
+
+// StatusAt reports the raid's status at the given moment. The bounds are
+// inclusive on both ends, matching the active-raid lookup in week detection
+// (StartDate <= now <= EndDate).
+func (r RaidInfo) StatusAt(now time.Time) RaidStatus {
+	switch {
+	case r.StartDate.After(now):
+		return RaidStatusUpcoming
+	case r.EndDate.Before(now):
+		return RaidStatusEnded
+	default:
+		return RaidStatusActive
+	}
 }
 
 // PiscineInfo holds the active piscine event data.

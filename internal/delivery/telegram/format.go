@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"admin-bot/internal/domain"
+	"admin-bot/internal/usecase"
 )
 
 // formatRegionUpdatesMessage renders one region's block, mirroring the Astana
@@ -20,6 +21,10 @@ func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo, date string) stri
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "### %s - %s\n", date, escapeHTML(region))
+	if info.HasLeadApplications {
+		l := info.LeadApplications
+		fmt.Fprintf(&sb, "- %d заявок с сайта (сегодня: %d, вчера: %d)\n", l.Total, l.Today, l.Yesterday)
+	}
 	fmt.Fprintf(&sb, "- %d заявок\n", info.SignedUpWithoutOnboarding)
 	fmt.Fprintf(&sb, "- %d прошли игры\n", info.SucceededOnboardingGames)
 	writeRegionMetric(&sb, info, domain.EventCheckin, info.CheckinRegistrations, "reg на check-in")
@@ -114,6 +119,98 @@ func parsePiscineFromCallback(data, prefix string) string {
 		return ""
 	}
 	return strings.TrimPrefix(data, prefix)
+}
+
+// raidInfoText renders the /raid* reply for a piscine.
+//
+// It reports the running raid when there is one, AND the raid that finished
+// recently enough that its defense is still ahead (see usecase.DefenseWindowEnd).
+// Before this, a raid that ended on Monday disappeared from the command the same
+// day — even though defenses run for the rest of the week and that is exactly
+// when admins ask about it.
+func raidInfoText(piscine domain.PiscineType, info *usecase.CurrentWeekInfo, loc *time.Location) string {
+	var sb strings.Builder
+
+	// A running piscine with no raid events yet has no week to report — saying
+	// "Неделя 4 (Final Exam)" for a cohort that just started would be worse than
+	// saying nothing.
+	if !info.HasRaids {
+		return fmt.Sprintf("📌 <b>%s</b>\nРейды не найдены — на платформе у этого бассейна нет рейд-ивентов.",
+			escapeHTML(string(piscine)))
+	}
+
+	header := fmt.Sprintf("📌 <b>%s</b> — Неделя %d", escapeHTML(string(piscine)), info.WeekNumber)
+	if info.ActiveRaid == nil && info.RaidStatus == domain.RaidStatusNone {
+		header += " (Final Exam)"
+	}
+	sb.WriteString(header + "\n")
+
+	if info.ActiveRaid != nil {
+		// The raid may still be in its registration window, in which case it is
+		// the NEXT raid rather than a running one — label it so, otherwise the
+		// message reads as if defenses were already being scheduled.
+		status := "⚔️ Рейд"
+		if info.RaidStatus == domain.RaidStatusUpcoming {
+			status = "⏳ Рейд (ещё не начался)"
+		}
+		writeRaidBlock(&sb, status, info.ActiveRaid, loc)
+	}
+
+	if info.RecentRaid != nil {
+		if info.ActiveRaid != nil {
+			sb.WriteString("\n\n")
+		}
+		writeRaidBlock(&sb, "🏁 Рейд завершён — идёт защита", info.RecentRaid, loc)
+		fmt.Fprintf(&sb, "\n🎤 Защита после рейда: информация доступна до пятницы, %s",
+			usecase.DefenseWindowEnd(info.RecentRaid.EndDate.In(locOrUTC(loc))).Format("02.01"))
+	}
+
+	if info.ActiveRaid == nil && info.RecentRaid == nil {
+		sb.WriteString("Активных рейдов нет.")
+	}
+	return sb.String()
+}
+
+// writeRaidBlock renders one raid: its name, team count and window.
+func writeRaidBlock(sb *strings.Builder, status string, raid *domain.RaidInfo, loc *time.Location) {
+	fmt.Fprintf(sb, "%s: <b>%s</b>\n👥 Команд: %d\n📅 %s — %s",
+		status, escapeHTML(raid.RaidName), raid.TeamsCount,
+		fmtRaidTime(raid.StartDate, loc), fmtRaidTime(raid.EndDate, loc))
+}
+
+// fmtRaidTime renders a raid boundary in the configured timezone, so the times
+// match what admins see locally rather than the container clock.
+func fmtRaidTime(t time.Time, loc *time.Location) string {
+	if t.IsZero() {
+		return "—"
+	}
+	return t.In(locOrUTC(loc)).Format("02.01 15:04")
+}
+
+func locOrUTC(loc *time.Location) *time.Location {
+	if loc == nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// defenseDateFor is the date the defenses of a raid take place on: the first
+// Monday on or after the raid ends. Deriving it from the raid (rather than from
+// "the next Monday from today") keeps the table header right when the table is
+// built after the raid has already finished.
+func defenseDateFor(raid *domain.RaidInfo, now time.Time) time.Time {
+	if raid == nil || raid.EndDate.IsZero() {
+		return nextMonday(now)
+	}
+	return mondayOnOrAfter(raid.EndDate.In(now.Location()))
+}
+
+// mondayOnOrAfter returns t's own date when it is a Monday, else the next
+// Monday, at midnight in t's location.
+func mondayOnOrAfter(t time.Time) time.Time {
+	days := (int(time.Monday) - int(t.Weekday()) + 7) % 7
+	monday := t.AddDate(0, 0, days)
+	return time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, t.Location())
 }
 
 // nextMonday returns the date of the next Monday from the given time, at

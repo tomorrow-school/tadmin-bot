@@ -287,6 +287,28 @@ func TestFormatRegionUpdatesMessage(t *testing.T) {
 	}
 }
 
+// TestFormatRegionUpdatesMessage_LeadApplications verifies the website-lead line
+// is shown (with its own label, distinct from onboarding "заявок") only when the
+// lead data is flagged present.
+func TestFormatRegionUpdatesMessage_LeadApplications(t *testing.T) {
+	withLeads := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region:              "shymkent",
+		LeadApplications:    domain.LeadCounts{Total: 196, Today: 6, Yesterday: 12},
+		HasLeadApplications: true,
+	}, "02.07.2026")
+	if !strings.Contains(withLeads, "- 196 заявок с сайта (сегодня: 6, вчера: 12)\n") {
+		t.Errorf("lead line missing/incorrect when present:\n%s", withLeads)
+	}
+
+	// Absent lead data: no lead line, even though the field defaults to 0.
+	without := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region: "shymkent",
+	}, "02.07.2026")
+	if strings.Contains(without, "заявок с сайта") {
+		t.Errorf("lead line must be omitted when data absent:\n%s", without)
+	}
+}
+
 // TestFormatRegionUpdatesMessage_StaleEvent verifies a metric backed by a stale
 // pinned event (check-in) is shown as unavailable rather than as a (misleading)
 // count.
@@ -323,5 +345,139 @@ func TestFormatRegionUpdatesMessage_UpcomingPiscine(t *testing.T) {
 	}
 	if !strings.Contains(got, "- 17 reg на module/piscine-rust (скоро старт: 06.07)") {
 		t.Errorf("upcoming piscine line missing start annotation:\n%s", got)
+	}
+}
+
+// TestParseTablesArg covers the /create_tables argument: no argument keeps the
+// historical "every piscine" behavior, a known alias narrows to one piscine, and
+// an unknown argument is rejected (rather than falling back to updating
+// everything, which is the accident this command used to make easy).
+func TestParseTablesArg(t *testing.T) {
+	all := len(domain.AllPiscines())
+	cases := []struct {
+		in        string
+		wantOK    bool
+		wantCount int
+		wantFirst domain.PiscineType
+	}{
+		{"/create_tables", true, all, domain.PiscineGo},
+		{"/create_tables@tadmin_bot", true, all, domain.PiscineGo},
+		{"/create_tables all", true, all, domain.PiscineGo},
+		{"/create_tables все", true, all, domain.PiscineGo},
+		{"/create_tables go", true, 1, domain.PiscineGo},
+		{"/create_tables js", true, 1, domain.PiscineJS},
+		{"/create_tables RUST", true, 1, domain.PiscineRUST},
+		{"/create_tables ai2", true, 1, domain.PiscineAI_2},
+		{"  /create_tables   rust  ", true, 1, domain.PiscineRUST},
+		{"/create_tables python", false, 0, ""},
+		{"/create_tables 3", false, 0, ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			got, ok := parseTablesArg(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if len(got) != tc.wantCount {
+				t.Fatalf("got %d piscines (%v), want %d", len(got), got, tc.wantCount)
+			}
+			if got[0] != tc.wantFirst {
+				t.Errorf("first = %q, want %q", got[0], tc.wantFirst)
+			}
+		})
+	}
+}
+
+// TestRejectConflictingTargets is the regression test for the data loss: two
+// piscines resolving to one spreadsheet must NOT both be written, because the
+// second write clears A1:Z1000 and replaces the first one's defense table.
+func TestRejectConflictingTargets(t *testing.T) {
+	raid := &domain.RaidInfo{RaidName: "r"}
+
+	t.Run("distinct_documents_all_written", func(t *testing.T) {
+		writable, lines := rejectConflictingTargets([]tableTarget{
+			{piscine: domain.PiscineGo, spreadsheetID: "DOC_A", raid: raid},
+			{piscine: domain.PiscineJS, spreadsheetID: "DOC_B", raid: raid},
+		})
+		if len(writable) != 2 {
+			t.Errorf("writable = %d, want 2", len(writable))
+		}
+		if len(lines) != 0 {
+			t.Errorf("unexpected warnings: %v", lines)
+		}
+	})
+
+	t.Run("shared_document_blocks_both", func(t *testing.T) {
+		writable, lines := rejectConflictingTargets([]tableTarget{
+			{piscine: domain.PiscineRUST, spreadsheetID: "SHARED", raid: raid},
+			{piscine: domain.PiscineGo, spreadsheetID: "SHARED", raid: raid},
+		})
+		if len(writable) != 0 {
+			t.Fatalf("writable = %v, want none (both target one document)", writable)
+		}
+		if len(lines) != 1 {
+			t.Fatalf("lines = %v, want exactly one explanation", lines)
+		}
+		for _, want := range []string{"Piscine RUST", "Piscine Go", "/create_tables rust", "/create_tables go"} {
+			if !strings.Contains(lines[0], want) {
+				t.Errorf("explanation %q missing %q", lines[0], want)
+			}
+		}
+	})
+
+	t.Run("conflict_does_not_block_unrelated_target", func(t *testing.T) {
+		writable, lines := rejectConflictingTargets([]tableTarget{
+			{piscine: domain.PiscineRUST, spreadsheetID: "SHARED", raid: raid},
+			{piscine: domain.PiscineGo, spreadsheetID: "SHARED", raid: raid},
+			{piscine: domain.PiscineJS, spreadsheetID: "DOC_B", raid: raid},
+		})
+		if len(writable) != 1 || writable[0].piscine != domain.PiscineJS {
+			t.Errorf("writable = %v, want only Piscine JS", writable)
+		}
+		if len(lines) != 1 {
+			t.Errorf("lines = %v, want one explanation", lines)
+		}
+	})
+
+	t.Run("single_target_never_conflicts", func(t *testing.T) {
+		writable, lines := rejectConflictingTargets([]tableTarget{
+			{piscine: domain.PiscineRUST, spreadsheetID: "SHARED", raid: raid},
+		})
+		if len(writable) != 1 {
+			t.Errorf("writable = %v, want the single target", writable)
+		}
+		if len(lines) != 0 {
+			t.Errorf("unexpected warnings: %v", lines)
+		}
+	})
+}
+
+// TestSharedDocumentWarning verifies a write into a document configured in two
+// SHEET_* slots is flagged — this is the .env case where SHEET_GO_WEEK1 and
+// SHEET_GO_WEEK2 hold the same URL, so week 2 overwrites week 1's table.
+func TestSharedDocumentWarning(t *testing.T) {
+	h := &Handler{sheetSlots: map[string][]string{
+		"SHARED_DOC": {"SHEET_GO_WEEK1", "SHEET_GO_WEEK2"},
+		"OWN_DOC":    {"SHEET_JS_WEEK1"},
+	}}
+
+	got := h.sharedDocumentWarning("SHARED_DOC")
+	if got == "" {
+		t.Fatal("expected a warning for a document used by two slots")
+	}
+	for _, want := range []string{"SHEET_GO_WEEK1", "SHEET_GO_WEEK2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning %q missing %q", got, want)
+		}
+	}
+	if got := h.sharedDocumentWarning("OWN_DOC"); got != "" {
+		t.Errorf("no warning expected for a dedicated document, got %q", got)
+	}
+	if got := h.sharedDocumentWarning("UNKNOWN"); got != "" {
+		t.Errorf("no warning expected for an unknown document, got %q", got)
 	}
 }

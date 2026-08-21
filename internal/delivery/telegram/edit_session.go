@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"sync"
+	"time"
 
 	"admin-bot/internal/domain"
 )
@@ -32,10 +33,14 @@ type editTableSession struct {
 	EventID int
 	Label   string // display label for an "other" pool
 
-	// Raid/week selection.
+	// Raid/week selection. The dates are kept so the dialog can tell the admin
+	// they are preparing a table before the raid starts (allowed here, unlike the
+	// automatic /create_tables path).
 	WeekNumber int
 	RaidName   string
 	TeamsCount int
+	RaidStatus domain.RaidStatus
+	RaidStart  time.Time
 
 	// Layout parameters gathered from the admin.
 	Columns       int

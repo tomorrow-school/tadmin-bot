@@ -17,4 +17,14 @@ var (
 
 	// ErrNoCampuses is returned when the platform has no campus objects to process.
 	ErrNoCampuses = errors.New("no campuses found")
+
+	// ErrNoActivePiscine is returned when a piscine has no currently running
+	// event on the platform (it has finished, or has not started yet). It is a
+	// normal state, not a failure, so callers report it differently from an
+	// upstream error.
+	ErrNoActivePiscine = errors.New("no active piscine")
+
+	// ErrNoRaidForAnnouncement is returned when a ready-made announcement needs
+	// the current raid (its name) but the piscine has none to talk about.
+	ErrNoRaidForAnnouncement = errors.New("no raid available for announcement")
 )

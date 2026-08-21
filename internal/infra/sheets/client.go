@@ -33,11 +33,11 @@ const (
 	// slot length (SlotMinutes == 0). Normal paths set it via the schedule.
 	slotDuration = 30 * time.Minute
 
-	// defaultClearRange wipes the first sheet before rewriting. The pre-created
-	// templates have a single tab — we always write to whatever its current
-	// name is by using an unqualified A1 notation (no "SheetName!" prefix),
-	// which targets the first sheet.
-	defaultClearRange = "A1:Z1000"
+	// maxResetRows/maxResetColumns bound the range wiped before rewriting (the
+	// old A1:Z1000). The actual range is clamped to the sheet's real grid, since
+	// a range past the grid edge is rejected by the API.
+	maxResetRows    = 1000
+	maxResetColumns = 26
 )
 
 // NewClient creates a Sheets client using a service account credentials JSON file.
@@ -62,55 +62,83 @@ type DefenseTableParams struct {
 	Schedule    usecase.DefenseSchedule
 }
 
+// UpdateResult reports the outcome of a table update.
+type UpdateResult struct {
+	// URL is the canonical link to the spreadsheet.
+	URL string
+
+	// FormatFailed is true when the rows were written but formatting could not be
+	// applied. The data is usable, so this is not an error — but it is surfaced
+	// rather than only logged, because the visible symptom ("the table looks
+	// broken") otherwise has no explanation in the chat.
+	FormatFailed bool
+}
+
 // UpdateDefenseTable wipes the first sheet of the given spreadsheet and
 // rewrites it with the latest defense schedule. The spreadsheet must already
 // exist and be shared with the bot's service account.
-//
-// Returns the canonical URL to the spreadsheet.
-func (c *Client) UpdateDefenseTable(ctx context.Context, spreadsheetID string, params DefenseTableParams) (string, error) {
-	// 1. Resolve the first sheet (its tab name and sheetId).
-	tabName, sheetID, err := c.firstSheetMeta(ctx, spreadsheetID)
+func (c *Client) UpdateDefenseTable(ctx context.Context, spreadsheetID string, params DefenseTableParams) (UpdateResult, error) {
+	// 1. Resolve the first sheet (its tab name, sheetId and grid size).
+	meta, err := c.firstSheetMeta(ctx, spreadsheetID)
 	if err != nil {
-		return "", fmt.Errorf("inspect spreadsheet: %w", err)
+		return UpdateResult{}, fmt.Errorf("inspect spreadsheet: %w", err)
 	}
 
 	rowData := buildRows(params)
 
-	// 2. Wipe the first sheet so stale rows don't bleed into the new table.
-	clearRange := fmt.Sprintf("'%s'!%s", tabName, defaultClearRange)
-	if _, err := c.sheetsSvc.Spreadsheets.Values.Clear(
-		spreadsheetID, clearRange, &sheets.ClearValuesRequest{},
-	).Context(ctx).Do(); err != nil {
-		return "", fmt.Errorf("clear values: %w", err)
+	// 2. Reset the working range — both values and formatting — so nothing from a
+	// previous, differently sized table bleeds into the new one.
+	if err := c.resetSheet(ctx, spreadsheetID, meta); err != nil {
+		return UpdateResult{}, fmt.Errorf("reset sheet: %w", err)
 	}
 
 	// 3. Write the new content.
-	if err := c.populateSheet(ctx, spreadsheetID, tabName, params, rowData); err != nil {
-		return "", fmt.Errorf("populate sheet: %w", err)
+	if err := c.populateSheet(ctx, spreadsheetID, meta.title, params, rowData); err != nil {
+		return UpdateResult{}, fmt.Errorf("populate sheet: %w", err)
 	}
 
-	// 4. Apply formatting (non-critical — log and continue on failure).
-	if err := c.formatSheet(ctx, spreadsheetID, sheetID, rowData, params.Schedule.Columns); err != nil {
-		c.logger.Warn("formatting failed (non-critical)", "spreadsheet_id", spreadsheetID, "err", err)
+	// 4. Apply formatting. The rows are already in place, so a failure here does
+	// not invalidate the table — report it instead of failing the whole update.
+	result := UpdateResult{URL: fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/edit", spreadsheetID)}
+	if err := c.formatSheet(ctx, spreadsheetID, meta.sheetID, rowData, params.Schedule.Columns); err != nil {
+		c.logger.Warn("formatting failed (data written)", "spreadsheet_id", spreadsheetID, "err", err)
+		result.FormatFailed = true
 	}
 
-	url := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/edit", spreadsheetID)
-	c.logger.Info("defense table updated", "spreadsheet_id", spreadsheetID, "url", url)
-	return url, nil
+	c.logger.Info("defense table updated", "spreadsheet_id", spreadsheetID,
+		"url", result.URL, "rows", len(rowData), "format_failed", result.FormatFailed)
+	return result, nil
 }
 
-// firstSheetMeta returns the title and sheetId of the first sheet of the
-// spreadsheet — needed because writes and formatting both have to target a
-// specific tab.
-func (c *Client) firstSheetMeta(ctx context.Context, spreadsheetID string) (title string, sheetID int64, err error) {
+// sheetMeta describes the tab the bot writes to. The grid size matters because
+// the reset below addresses cells by index, and a range past the grid edge is
+// rejected by the API.
+type sheetMeta struct {
+	title       string
+	sheetID     int64
+	rowCount    int64
+	columnCount int64
+}
+
+// firstSheetMeta returns the first sheet of the spreadsheet — writes and
+// formatting both have to target a specific tab, and the pre-created templates
+// have a single one.
+func (c *Client) firstSheetMeta(ctx context.Context, spreadsheetID string) (sheetMeta, error) {
 	resp, err := c.sheetsSvc.Spreadsheets.Get(spreadsheetID).
-		Fields("sheets.properties.sheetId,sheets.properties.title").
+		Fields("sheets.properties.sheetId,sheets.properties.title,sheets.properties.gridProperties").
 		Context(ctx).Do()
 	if err != nil {
-		return "", 0, err
+		return sheetMeta{}, err
 	}
 	if len(resp.Sheets) == 0 || resp.Sheets[0].Properties == nil {
-		return "", 0, fmt.Errorf("spreadsheet %q has no sheets", spreadsheetID)
+		return sheetMeta{}, fmt.Errorf("spreadsheet %q has no sheets", spreadsheetID)
 	}
-	return resp.Sheets[0].Properties.Title, resp.Sheets[0].Properties.SheetId, nil
+
+	props := resp.Sheets[0].Properties
+	meta := sheetMeta{title: props.Title, sheetID: props.SheetId}
+	if props.GridProperties != nil {
+		meta.rowCount = props.GridProperties.RowCount
+		meta.columnCount = props.GridProperties.ColumnCount
+	}
+	return meta, nil
 }

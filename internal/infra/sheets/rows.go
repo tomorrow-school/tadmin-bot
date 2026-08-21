@@ -31,8 +31,8 @@ func buildRows(params DefenseTableParams) []tableRow {
 
 	var rows []tableRow
 	// Start time and slot length come from the schedule so /edit_tables can vary
-	// them; the automatic paths pass 11:00 / 30-min via DefaultScheduleParams.
-	// A break occupies one slot's worth of time.
+	// them; the automatic paths derive the start from the 17:30 deadline via
+	// usecase.AutoScheduleParams. A break occupies one slot's worth of time.
 	slot := time.Duration(schedule.SlotMinutes) * time.Minute
 	if slot <= 0 {
 		slot = slotDuration

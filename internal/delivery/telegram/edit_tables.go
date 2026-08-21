@@ -52,7 +52,8 @@ func (h *Handler) HandleEditTables(ctx context.Context, b *bot.Bot, update *mode
 	}
 }
 
-// HandleCancel aborts an active /edit_tables dialog in the chat.
+// HandleCancel aborts whichever dialog is active in the chat (/edit_tables or
+// /announce).
 func (h *Handler) HandleCancel(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID, ok := h.guard(ctx, update)
 	if !ok {
@@ -253,6 +254,8 @@ func (h *Handler) HandleCallbackEditRaid(ctx context.Context, b *bot.Bot, update
 	s.WeekNumber = raid.WeekNumber
 	s.RaidName = raid.RaidName
 	s.TeamsCount = raid.TeamsCount
+	s.RaidStatus = raid.StatusAt(h.now())
+	s.RaidStart = raid.StartDate
 	s.Step = stepColumns
 	h.answer(ctx, b, cb.ID, "Ок")
 
@@ -260,6 +263,15 @@ func (h *Handler) HandleCallbackEditRaid(ctx context.Context, b *bot.Bot, update
 		"📊 Рейд: <b>%s</b>\n📅 Неделя: %d\n👥 Команд: %d\n\nСколько аудиторий (колонок)?",
 		escapeHTML(raid.RaidName), raid.WeekNumber, raid.TeamsCount,
 	)
+	// Manual mode may prepare a table before the raid starts (unlike
+	// /create_tables), but the admin should know that's what they're doing —
+	// the team count is not final yet.
+	if s.RaidStatus == domain.RaidStatusUpcoming {
+		info = fmt.Sprintf(
+			"⏳ Рейд ещё не начался (старт %s) — идёт регистрация, число команд может измениться.\n\n",
+			raid.StartDate.Format("02.01 15:04"),
+		) + info
+	}
 	// ForceReply so the answer is delivered even in a group with privacy mode on.
 	if err := h.askText(ctx, chatID, info); err != nil {
 		h.logger.Error("send raid info failed", "err", err)
@@ -449,7 +461,7 @@ func (h *Handler) finishEditTable(ctx context.Context, chatID int64, s *editTabl
 		return
 	}
 
-	url, err := h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
+	res, err := h.sheets.UpdateDefenseTable(ctx, spreadsheetID, sheets.DefenseTableParams{
 		RaidName:    s.RaidName,
 		DefenseDate: nextMonday(h.now()),
 		Schedule:    schedule,
@@ -465,7 +477,18 @@ func (h *Handler) finishEditTable(ctx context.Context, chatID int64, s *editTabl
 	h.editSessions.clear(chatID)
 
 	window := fmt.Sprintf("%02d:%02d-%02d:%02d", s.StartHour, s.StartMinute, s.EndHour, s.EndMinute)
-	text := fmt.Sprintf("✅ Таблица обновлена: %s", url)
+	text := fmt.Sprintf("✅ Таблица обновлена: %s", res.URL)
+	if res.FormatFailed {
+		text += "\n" + msgFormattingFailed
+	}
+	if warn := h.sharedDocumentWarning(spreadsheetID); warn != "" {
+		text += "\n" + warn
+	}
+	if s.RaidStatus == domain.RaidStatusUpcoming {
+		text += fmt.Sprintf(
+			"\n⏳ Рейд начнётся %s — таблица подготовлена заранее, число команд ещё может измениться.",
+			s.RaidStart.Format("02.01 15:04"))
+	}
 	if warn := buildCapacityWarning(window, s.Columns, s.SlotMinutes, schedule.TotalSlots, s.TeamsCount); warn != "" {
 		text += "\n" + warn
 	}

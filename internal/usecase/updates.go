@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -19,22 +20,21 @@ type UpdatesUseCase struct {
 	// A campus with no entry (or a zero-valued config) uses the default
 	// path-based lookup for every metric.
 	regionEvents map[string]domain.RegionUpdateEventsConfig
+
+	// leadClient fetches per-campus application (lead) counts from the apply
+	// site. Optional: when nil the region report omits the lead line.
+	leadClient domain.LeadClient
 }
 
-type AstanaUpdatesUseCase = UpdatesUseCase
-
-func NewUpdatesUseCase(eduClient domain.OneEduClient, regionEvents map[string]domain.RegionUpdateEventsConfig) *UpdatesUseCase {
+func NewUpdatesUseCase(eduClient domain.OneEduClient, regionEvents map[string]domain.RegionUpdateEventsConfig, leadClient domain.LeadClient) *UpdatesUseCase {
 	if regionEvents == nil {
 		regionEvents = map[string]domain.RegionUpdateEventsConfig{}
 	}
 	return &UpdatesUseCase{
 		eduClient:    eduClient,
 		regionEvents: regionEvents,
+		leadClient:   leadClient,
 	}
-}
-
-func NewAstanaUpdatesUseCase(eduClient domain.OneEduClient) *AstanaUpdatesUseCase {
-	return NewUpdatesUseCase(eduClient, nil)
 }
 
 // eventsForRegion returns the pinned event-ID config for a campus, or a
@@ -157,6 +157,11 @@ func (u *UpdatesUseCase) GetRegionUpdates(ctx context.Context) (domain.RegionUpd
 	now := time.Now()
 	current, upcoming := u.discoverPiscines(ctx)
 
+	// Fetch website application (lead) counts once. Best-effort: leadCounts is nil
+	// when the lead client is unconfigured or the fetch failed, in which case the
+	// report simply omits the lead line rather than failing the whole command.
+	leadCounts := u.leadCounts(ctx)
+
 	for _, campus := range campuses {
 		campus = strings.TrimSpace(campus)
 		if campus == "" {
@@ -192,8 +197,49 @@ func (u *UpdatesUseCase) GetRegionUpdates(ctx context.Context) (domain.RegionUpd
 
 		info.PiscineRegistrations = u.piscineRegistrations(ctx, campus, current, upcoming, now)
 
+		if leadCounts != nil {
+			// A campus absent from the map has zero submissions, not missing data.
+			info.LeadApplications = leadCounts[applyCampusKey(campus)]
+			info.HasLeadApplications = true
+		}
+
 		report.Regions = append(report.Regions, *info)
 	}
 
 	return report, nil
+}
+
+// applyCampusAliases maps a 01-edu campus name (lowercased) to the campus_id
+// the apply site uses when the two systems spell the same city differently.
+// 01-edu reports "petropavlovsk"; the apply export keys it as "petropavl".
+// Add an entry here for any future mismatch surfaced by the lead line reading 0
+// for a campus that clearly has applications.
+var applyCampusAliases = map[string]string{
+	"petropavlovsk": "petropavl",
+}
+
+// applyCampusKey normalizes a 01-edu campus name to the apply site's campus_id
+// key: lowercased, with known cross-system aliases applied.
+func applyCampusKey(campus string) string {
+	key := strings.ToLower(strings.TrimSpace(campus))
+	if alias, ok := applyCampusAliases[key]; ok {
+		return alias
+	}
+	return key
+}
+
+// leadCounts fetches per-campus application counts from the lead client, keyed
+// by lowercased campus ID. It is best-effort: a nil client or a fetch error
+// yields nil so the caller reports regions without a lead line rather than
+// failing. Errors are logged, not surfaced to the chat.
+func (u *UpdatesUseCase) leadCounts(ctx context.Context) map[string]domain.LeadCounts {
+	if u.leadClient == nil {
+		return nil
+	}
+	counts, err := u.leadClient.GetLeadCountsByCampus(ctx)
+	if err != nil {
+		slog.Warn("fetch lead counts failed; region report will omit lead line", "err", err)
+		return nil
+	}
+	return counts
 }

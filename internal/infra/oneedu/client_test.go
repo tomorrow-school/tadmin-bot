@@ -3,6 +3,7 @@ package oneedu
 import (
 	"encoding/base64"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -116,19 +117,63 @@ func TestBuildRegionStatsVariables(t *testing.T) {
 	got := buildRegionStatsVariables("shymkent", start, end)
 
 	want := map[string]interface{}{
-		"campus":      "shymkent",
-		"startDate":   "2025-06-25T00:00:00+06:00",
-		"endDate":     "2026-06-30T23:59:59+06:00",
-		"adminRole":   "campus_admin_shymkent",
-		"gamesPath":   "/shymkent/onboarding/games",
-		"checkinPath": "/shymkent/onboarding/checkin",
-		"corePath":    "/shymkent/module",
+		"campus":           "shymkent",
+		"startDate":        "2025-06-25T00:00:00+06:00",
+		"endDate":          "2026-06-30T23:59:59+06:00",
+		"adminRole":        "campus_admin_shymkent",
+		"gamesPath":        "/shymkent/onboarding/games",
+		"checkinPathRegex": "^/shymkent/onboarding/check-?in$",
+		"corePath":         "/shymkent/module",
 	}
 
 	for key, wantValue := range want {
 		if got[key] != wantValue {
 			t.Errorf("%s = %v, want %v", key, got[key], wantValue)
 		}
+	}
+}
+
+// TestCheckinPathPattern covers the spelling difference that made the Pavlodar
+// check-in count read 0: its path uses a hyphen, every other campus does not.
+func TestCheckinPathPattern(t *testing.T) {
+	cases := []struct {
+		region string
+		path   string
+		want   bool
+	}{
+		{"pavlodar", "/pavlodar/onboarding/check-in", true},
+		{"pavlodar", "/pavlodar/onboarding/checkin", true},
+		{"shymkent", "/shymkent/onboarding/checkin", true},
+		{"shymkent", "/shymkent/onboarding/check-in", true},
+		// Anchored: must not match a longer path or another campus.
+		{"pavlodar", "/pavlodar/onboarding/check-in/extra", false},
+		{"pavlodar", "/x/pavlodar/onboarding/check-in", false},
+		{"pavlodar", "/semey/onboarding/checkin", false},
+		{"pavlodar", "/pavlodar/onboarding/checkpoint", false},
+	}
+
+	for _, tc := range cases {
+		re, err := regexp.Compile("(?i)" + checkinPathPattern(tc.region))
+		if err != nil {
+			t.Fatalf("checkinPathPattern(%q) is not a valid pattern: %v", tc.region, err)
+		}
+		if got := re.MatchString(tc.path); got != tc.want {
+			t.Errorf("%s: match(%q) = %v, want %v", tc.region, tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestExactPathPattern verifies a pinned event's path still matches only itself.
+func TestExactPathPattern(t *testing.T) {
+	re, err := regexp.Compile("(?i)" + exactPathPattern("/pavlodar/onboarding/check-in"))
+	if err != nil {
+		t.Fatalf("invalid pattern: %v", err)
+	}
+	if !re.MatchString("/pavlodar/onboarding/check-in") {
+		t.Error("a pinned path must match itself")
+	}
+	if re.MatchString("/pavlodar/onboarding/checkin") {
+		t.Error("a pinned path must not match a different spelling")
 	}
 }
 

@@ -106,7 +106,7 @@ query region_stats(
   $endDate: timestamptz!
   $adminRole: String!
   $gamesPath: String!
-  $checkinPath: String!
+  $checkinPathRegex: String!
   $corePath: String!
 ) {
   signed_up_no_onboarding: user_aggregate(
@@ -144,10 +144,13 @@ query region_stats(
     }
   }
 
+  # Matched by anchored regex, not _eq: campuses do not spell this path the same
+  # way (Pavlodar uses "check-in", everyone else "checkin"), and an exact match
+  # silently reported 0 registrations for a whole region.
   checkin: registration_user_aggregate(
     where: {
       registration: {
-        path: { _eq: $checkinPath }
+        path: { _iregex: $checkinPathRegex }
         endAt: { _gt: $endDate }
       }
     }

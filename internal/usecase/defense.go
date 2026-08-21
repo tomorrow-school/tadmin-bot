@@ -12,13 +12,18 @@ const (
 	breakDuration      = 30 * time.Minute
 	maxConsecutiveRows = 5
 
-	// Defaults reproducing the historical hard-coded behavior. Callers that do
-	// not let the admin override the layout (the automatic /create_tables run and
-	// the scheduled defense reminder) pass these so their output is unchanged.
+	// Defaults for callers that do not let the admin override the layout (the
+	// automatic /create_tables run and the scheduled defense reminder).
 	DefaultColumns     = 3
-	DefaultStartHour   = 11
-	DefaultStartMinute = 0
 	DefaultSlotMinutes = 30
+
+	// AutoEndHour/AutoEndMinute is the hard deadline for the automatic defense
+	// schedule: defenses must be over by 17:30. The start time is therefore
+	// derived backwards from how many rows the teams need, rather than fixed
+	// (it used to be a fixed 11:00 start, which is why an 18-team raid was
+	// scheduled from 11:00 instead of 14:30).
+	AutoEndHour   = 17
+	AutoEndMinute = 30
 )
 
 // ScheduleParams captures the tunable inputs of a defense schedule. The
@@ -55,7 +60,7 @@ func CalculateDefenseSchedule(params ScheduleParams) DefenseSchedule {
 		columns = 1
 	}
 
-	rows := int(math.Ceil(float64(params.TeamsCount) / float64(columns)))
+	rows := scheduleRows(params.TeamsCount, columns)
 	totalSlots := rows * columns
 
 	var breakAfterRows []int
@@ -163,16 +168,46 @@ func formatMinutes(m int) string {
 	return fmt.Sprintf("%02d:%02d", (m/60)%24, m%60)
 }
 
-// DefaultScheduleParams builds the parameter set reproducing the historical
-// fixed layout (3 columns, 11:00 start, breaks on) for a given team count.
-func DefaultScheduleParams(teamsCount int) ScheduleParams {
+// AutoScheduleParams builds the parameter set for the automatic paths
+// (/create_tables and the scheduled defense reminder): the schedule ends at
+// AutoEndHour:AutoEndMinute (17:30) and starts exactly as early as the team
+// count requires — rows = ceil(teams / DefaultColumns), each row one slot long.
+// So 18 teams over 3 columns give 6 rows and a 14:30–17:30 window.
+//
+// Breaks are deliberately off here: the automatic grid is back-to-back so the
+// arithmetic stays "число команд → время старта". The break logic
+// (computeBreaks/enforceMaxConsecutive) is untouched and still serves the manual
+// /edit_tables path.
+func AutoScheduleParams(teamsCount int) ScheduleParams {
+	rows := scheduleRows(teamsCount, DefaultColumns)
+	startHour, startMinute := startForEnd(AutoEndHour, AutoEndMinute, rows*DefaultSlotMinutes)
 	return ScheduleParams{
 		TeamsCount:    teamsCount,
 		Columns:       DefaultColumns,
-		StartHour:     DefaultStartHour,
-		StartMinute:   DefaultStartMinute,
-		IncludeBreaks: true,
+		StartHour:     startHour,
+		StartMinute:   startMinute,
+		IncludeBreaks: false,
 	}
+}
+
+// scheduleRows is the row count a team count needs at the given column count:
+// ceil(teams / columns), never negative. columns is assumed >= 1.
+func scheduleRows(teamsCount, columns int) int {
+	if teamsCount <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(teamsCount) / float64(columns)))
+}
+
+// startForEnd returns the clock time durationMinutes before endHour:endMinute.
+// A schedule too long to fit the day is clamped to 00:00 rather than wrapping
+// into the previous day, which would render as a nonsensical late-night start.
+func startForEnd(endHour, endMinute, durationMinutes int) (hour, minute int) {
+	start := endHour*60 + endMinute - durationMinutes
+	if start < 0 {
+		start = 0
+	}
+	return start / 60, start % 60
 }
 
 // computeBreaks determines after which rows breaks should be placed.
