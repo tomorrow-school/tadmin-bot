@@ -51,13 +51,12 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbEditSlot, bot.MatchTypePrefix, h.HandleCallbackEditSlot)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbEditBreaks, bot.MatchTypePrefix, h.HandleCallbackEditBreaks)
 
-	// Announcement flows. "sub_toggle" is exact and does not overlap the
-	// "sub_piscine:" prefix; same for the /announce send/cancel buttons.
+	// Subscription toggles ("sub_toggle" is exact and does not overlap the
+	// "sub_piscine:" prefix) and the /announce pickers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbSubToggle, bot.MatchTypeExact, h.HandleCallbackSubToggle)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbSubPiscine, bot.MatchTypePrefix, h.HandleCallbackSubPiscine)
-	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnSend, bot.MatchTypeExact, h.HandleCallbackAnnounceSend)
-	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnCancel, bot.MatchTypeExact, h.HandleCallbackAnnounceCancel)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnPiscine, bot.MatchTypePrefix, h.HandleCallbackAnnouncePiscine)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, cbAnnKind, bot.MatchTypePrefix, h.HandleCallbackAnnounceKind)
 
 	// Access-request decisions (super-admin only; enforced in the handlers).
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "access_approve:", bot.MatchTypePrefix, h.HandleCallbackAccessApprove)
@@ -72,13 +71,6 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
 		return awaitsDialogText(update) && h.editSessions.awaitingText(update.Message.Chat.ID)
 	}, h.HandleEditText)
-
-	// Same arrangement for the /announce body. The two predicates are mutually
-	// exclusive in practice (a chat is in at most one dialog at a time) and each
-	// only fires while its own dialog awaits text.
-	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
-		return awaitsDialogText(update) && h.announceSessions.awaitingText(update.Message.Chat.ID)
-	}, h.HandleAnnounceText)
 }
 
 // awaitsDialogText reports whether an update is ordinary text that a dialog could

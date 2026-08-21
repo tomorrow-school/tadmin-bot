@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,21 +18,16 @@ const (
 	cbSubToggle  = "sub_toggle"   // exact — turn announcements on/off
 	cbSubPiscine = "sub_piscine:" // + piscine type — follow/unfollow one piscine
 
-	cbAnnPiscine = "ann_piscine:" // + piscine type, or "all" — pick the audience
-	cbAnnSend    = "ann_send"     // exact — confirm and send
-	cbAnnCancel  = "ann_cancel"   // exact — discard the draft
+	cbAnnPiscine = "ann_piscine:" // + piscine type — pick the pool
+	cbAnnKind    = "ann_kind:"    // + "<announcement ID>:<piscine type>"
 )
 
-// announceAllArg is the audience token meaning "every subscriber, whatever they
-// follow".
-const announceAllArg = "all"
-
-const msgAnnounceNotConfigured = "⚠️ Рассылка анонсов не настроена (нет хранилища подписок)."
+const msgAnnounceNotConfigured = "⚠️ Подписки на анонсы не настроены (нет хранилища подписок)."
 
 // HandleSubscribe shows the caller's announcement settings with the toggles.
 // This is the "включить/отключить функцию" switch: while it is on, the user
-// receives both manual /announce messages and the scheduled announcements for
-// the piscines they picked.
+// receives the scheduled (cron) announcements for the piscines they picked.
+// /announce is a separate thing — it only answers with a ready text.
 func (h *Handler) HandleSubscribe(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID, ok := h.guard(ctx, update)
 	if !ok {
@@ -112,7 +108,7 @@ func piscineShortLabel(p domain.PiscineType) string {
 
 // HandleCallbackSubToggle flips the master switch and refreshes the screen.
 func (h *Handler) HandleCallbackSubToggle(ctx context.Context, b *bot.Bot, update *models.Update) {
-	cb, chatID, ok := h.announceCallbackGuard(ctx, b, update)
+	cb, chatID, ok := h.subscribeCallbackGuard(ctx, b, update)
 	if !ok {
 		return
 	}
@@ -135,7 +131,7 @@ func (h *Handler) HandleCallbackSubToggle(ctx context.Context, b *bot.Bot, updat
 // HandleCallbackSubPiscine follows/unfollows one piscine and refreshes the
 // screen.
 func (h *Handler) HandleCallbackSubPiscine(ctx context.Context, b *bot.Bot, update *models.Update) {
-	cb, chatID, ok := h.announceCallbackGuard(ctx, b, update)
+	cb, chatID, ok := h.subscribeCallbackGuard(ctx, b, update)
 	if !ok {
 		return
 	}
@@ -173,30 +169,24 @@ func (h *Handler) refreshSubscribeScreen(ctx context.Context, cb *models.Callbac
 	}
 }
 
-// HandleAnnounce starts the /announce dialog: pick the audience, send the text,
-// confirm.
+// HandleAnnounce starts the /announce flow: pick a piscine, then (for Piscine
+// Go, which has several) pick which announcement — and the bot answers with the
+// ready text. Nothing is broadcast: the admin copies the text where it belongs.
 func (h *Handler) HandleAnnounce(ctx context.Context, b *bot.Bot, update *models.Update) {
 	chatID, ok := h.guard(ctx, update)
 	if !ok {
 		return
 	}
-	if h.announceUC == nil {
-		_ = h.adapter.SendMessage(ctx, chatID, msgAnnounceNotConfigured)
-		return
-	}
-
-	// A fresh /announce discards any half-composed draft in this chat.
-	h.announceSessions.start(chatID)
 
 	if err := h.adapter.SendMessageWithKeyboard(ctx, chatID,
-		"📣 <b>Анонс</b>\n\nКому отправить?", announceAudienceKeyboard(),
+		"📣 <b>Анонс</b>\n\nПо какому бассейну?", announcePiscineKeyboard(),
 	); err != nil {
-		h.logger.Error("send announce audience picker failed", "err", err)
+		h.logger.Error("send announce piscine picker failed", "err", err)
 	}
 }
 
-// announceAudienceKeyboard offers one button per piscine plus "все подписчики".
-func announceAudienceKeyboard() *models.InlineKeyboardMarkup {
+// announcePiscineKeyboard offers one button per piscine, three to a row.
+func announcePiscineKeyboard() *models.InlineKeyboardMarkup {
 	var rows [][]models.InlineKeyboardButton
 	var row []models.InlineKeyboardButton
 
@@ -213,180 +203,172 @@ func announceAudienceKeyboard() *models.InlineKeyboardMarkup {
 	if len(row) > 0 {
 		rows = append(rows, row)
 	}
-	rows = append(rows, []models.InlineKeyboardButton{{
-		Text:         "Все подписчики",
-		CallbackData: cbAnnPiscine + announceAllArg,
-	}})
-
 	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// HandleCallbackAnnouncePiscine records the audience and asks for the text.
+// HandleCallbackAnnouncePiscine answers with the piscine's announcement. A pool
+// with exactly one announcement (everything except Piscine Go) skips the menu
+// and gets the text straight away.
 func (h *Handler) HandleCallbackAnnouncePiscine(ctx context.Context, b *bot.Bot, update *models.Update) {
-	cb, chatID, ok := h.announceCallbackGuard(ctx, b, update)
+	cb, chatID, ok := h.callbackGuard(ctx, b, update)
 	if !ok {
 		return
 	}
-	s, ok := h.announceSessions.get(chatID)
-	if !ok {
-		h.answer(ctx, b, cb.ID, "Сессия истекла — отправьте /announce")
+
+	name := parsePiscineFromCallback(cb.Data, cbAnnPiscine)
+	piscine := domain.PiscineType(name)
+	kinds := domain.AnnouncementKindsFor(piscine)
+	if name == "" || len(kinds) == 0 {
+		h.answer(ctx, b, cb.ID, "Неизвестный бассейн")
+		return
+	}
+	h.answer(ctx, b, cb.ID, name)
+
+	if len(kinds) == 1 {
+		h.sendAnnouncement(ctx, chatID, piscine, kinds[0])
 		return
 	}
 
-	arg := strings.TrimPrefix(cb.Data, cbAnnPiscine)
-	if arg == announceAllArg {
-		s.Piscine = ""
-		s.Label = "все подписчики"
-	} else {
-		piscine := parsePiscineFromCallback(cb.Data, cbAnnPiscine)
-		if piscine == "" {
-			h.answer(ctx, b, cb.ID, "Неизвестный бассейн")
-			return
-		}
-		s.Piscine = domain.PiscineType(piscine)
-		s.Label = piscine
-	}
-	s.Step = stepAnnounceText
-	h.answer(ctx, b, cb.ID, s.Label)
-
-	// ForceReply so the answer reaches the bot even in a group with privacy mode.
-	if err := h.askText(ctx, chatID, fmt.Sprintf(
-		"Аудитория: <b>%s</b>\n\nОтправьте текст анонса одним сообщением.\n/cancel — отмена.",
-		escapeHTML(s.Label),
-	)); err != nil {
-		h.logger.Error("send announce text prompt failed", "err", err)
+	if err := h.adapter.SendMessageWithKeyboard(ctx, chatID,
+		fmt.Sprintf("<b>%s</b> — какой анонс?", escapeHTML(name)),
+		announceKindKeyboard(piscine, kinds),
+	); err != nil {
+		h.logger.Error("send announce kind picker failed", "err", err)
 	}
 }
 
-// HandleAnnounceText accepts the announcement body and shows the confirmation
-// prompt. The text is HTML-escaped: announcements are plain text, and escaping
-// guarantees a message with "<" or "&" in it is delivered instead of rejected by
-// Telegram's HTML parser mid-broadcast.
-func (h *Handler) HandleAnnounceText(ctx context.Context, b *bot.Bot, update *models.Update) {
-	if update.Message == nil || update.Message.From == nil {
-		return
+// announceKindKeyboard lists a piscine's announcements, one per row (the
+// captions are too long to pair up). The piscine travels in the callback data,
+// so the flow needs no stored session — a button pressed hours later still
+// works.
+func announceKindKeyboard(piscine domain.PiscineType, kinds []domain.AnnouncementKind) *models.InlineKeyboardMarkup {
+	rows := make([][]models.InlineKeyboardButton, 0, len(kinds))
+	for _, k := range kinds {
+		rows = append(rows, []models.InlineKeyboardButton{{
+			Text:         k.Label,
+			CallbackData: cbAnnKind + k.ID + ":" + string(piscine),
+		}})
 	}
-	chatID := update.Message.Chat.ID
-	if !h.isAuthorized(chatID, update.Message.From.ID) {
-		return
-	}
-	s, ok := h.announceSessions.get(chatID)
-	if !ok || s.Step != stepAnnounceText {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// HandleCallbackAnnounceKind answers with the chosen announcement's text.
+func (h *Handler) HandleCallbackAnnounceKind(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cb, chatID, ok := h.callbackGuard(ctx, b, update)
+	if !ok {
 		return
 	}
 
-	text := strings.TrimSpace(update.Message.Text)
-	if text == "" {
-		_ = h.askText(ctx, chatID, "⚠️ Текст анонса пустой. Отправьте текст ещё раз.")
+	kind, piscine, ok := parseAnnounceKindCallback(cb.Data)
+	if !ok {
+		h.answer(ctx, b, cb.ID, "Неизвестный анонс")
 		return
 	}
+	h.answer(ctx, b, cb.ID, kind.Label)
+	h.sendAnnouncement(ctx, chatID, piscine, kind)
+}
 
-	recipients, err := h.announceUC.Recipients(s.Piscine)
+// parseAnnounceKindCallback splits "ann_kind:<id>:<piscine>" back into its
+// parts, checking that both halves are known.
+func parseAnnounceKindCallback(data string) (domain.AnnouncementKind, domain.PiscineType, bool) {
+	rest, ok := strings.CutPrefix(data, cbAnnKind)
+	if !ok {
+		return domain.AnnouncementKind{}, "", false
+	}
+	id, name, found := strings.Cut(rest, ":")
+	if !found {
+		return domain.AnnouncementKind{}, "", false
+	}
+	// Look the announcement up WITHIN the piscine's own menu, so a hand-crafted
+	// callback cannot pull a Go-only announcement into another pool.
+	piscine := domain.PiscineType(name)
+	kind, found := domain.AnnouncementKindFor(piscine, id)
+	if !found {
+		return domain.AnnouncementKind{}, "", false
+	}
+	return kind, piscine, true
+}
+
+// sendAnnouncement renders one announcement and posts it as the reply.
+//
+// The text is HTML-escaped: announcements are plain text, and escaping
+// guarantees a message containing "<" or "&" is delivered instead of being
+// rejected by Telegram's HTML parser.
+func (h *Handler) sendAnnouncement(ctx context.Context, chatID int64, piscine domain.PiscineType, kind domain.AnnouncementKind) {
+	text, warning, err := h.renderAnnouncement(ctx, piscine, kind)
 	if err != nil {
-		h.logger.Error("count announcement recipients failed", "err", err)
-		h.announceSessions.clear(chatID)
-		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось получить список подписчиков. Попробуйте позже.")
-		return
-	}
-
-	s.Text = escapeHTML(text)
-	s.Recipients = len(recipients)
-	s.Step = stepAnnounceConfirm
-
-	if len(recipients) == 0 {
-		h.announceSessions.clear(chatID)
-		_ = h.adapter.SendMessage(ctx, chatID, fmt.Sprintf(
-			"ℹ️ На «%s» пока никто не подписан — отправлять некому.\nПодписка включается командой /subscribe.",
-			escapeHTML(s.Label)))
-		return
-	}
-
-	preview := fmt.Sprintf(
-		"📣 <b>Проверьте анонс</b>\n\nАудитория: <b>%s</b>\nПолучателей: <b>%d</b>\n\n———\n%s\n———",
-		escapeHTML(s.Label), s.Recipients, s.Text,
-	)
-	keyboard := &models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: "📨 Отправить", CallbackData: cbAnnSend},
-			{Text: "❌ Отмена", CallbackData: cbAnnCancel},
-		}},
-	}
-	if err := h.adapter.SendMessageWithKeyboard(ctx, chatID, preview, keyboard); err != nil {
-		h.logger.Error("send announce confirmation failed", "err", err)
-	}
-}
-
-// HandleCallbackAnnounceSend performs the broadcast and reports the outcome.
-func (h *Handler) HandleCallbackAnnounceSend(ctx context.Context, b *bot.Bot, update *models.Update) {
-	cb, chatID, ok := h.announceCallbackGuard(ctx, b, update)
-	if !ok {
-		return
-	}
-	s, ok := h.announceSessions.get(chatID)
-	if !ok || s.Step != stepAnnounceConfirm {
-		h.answer(ctx, b, cb.ID, "Сессия истекла — отправьте /announce")
-		return
-	}
-
-	// Acknowledge before fanning out: the broadcast is paced, so it can outlast
-	// the callback-answer window.
-	h.answer(ctx, b, cb.ID, "Отправляю…")
-	h.announceSessions.clear(chatID)
-
-	h.logger.Info("announcement broadcast requested",
-		"user_id", cb.From.ID, "piscine", s.Piscine, "recipients", s.Recipients)
-
-	report, err := h.announceUC.Broadcast(ctx, s.Piscine, s.Text)
-	if err != nil {
-		h.logger.Error("announcement broadcast failed", "piscine", s.Piscine, "err", err)
-	}
-
-	if err := h.adapter.SendMessage(ctx, chatID, announceReportText(s.Label, report, err != nil)); err != nil {
-		h.logger.Error("send announce report failed", "err", err)
-	}
-}
-
-// HandleCallbackAnnounceCancel discards the draft.
-func (h *Handler) HandleCallbackAnnounceCancel(ctx context.Context, b *bot.Bot, update *models.Update) {
-	cb, chatID, ok := h.announceCallbackGuard(ctx, b, update)
-	if !ok {
-		return
-	}
-	h.announceSessions.clear(chatID)
-	h.answer(ctx, b, cb.ID, "Отменено")
-	if err := h.adapter.SendMessage(ctx, chatID, "❌ Анонс не отправлен."); err != nil {
-		h.logger.Error("send announce cancel failed", "err", err)
-	}
-}
-
-// announceReportText summarizes a finished broadcast for the admin: how many got
-// it, how many did not, and which users failed (usually someone who never opened
-// a chat with the bot, or blocked it). interrupted marks a run cut short by a
-// cancelled context, so a partial report is not read as complete.
-func announceReportText(label string, report usecase.BroadcastReport, interrupted bool) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "📣 <b>Анонс отправлен</b>\nАудитория: %s\n✅ Успешно: %d из %d",
-		escapeHTML(label), report.Sent, report.Recipients)
-
-	if failed := report.Failed(); failed > 0 {
-		fmt.Fprintf(&sb, "\n⚠️ Не доставлено: %d", failed)
-		ids := make([]string, 0, len(report.FailedUsers))
-		for _, id := range report.FailedUsers {
-			ids = append(ids, fmt.Sprintf("<code>%d</code>", id))
+		h.logger.Warn("render announcement failed", "kind", kind.ID, "piscine", piscine, "err", err)
+		if sendErr := h.adapter.SendMessage(ctx, chatID, announceRenderErrorText(kind, piscine, err)); sendErr != nil {
+			h.logger.Error("send announce render error failed", "err", sendErr)
 		}
-		fmt.Fprintf(&sb, " (%s)\nВозможно, эти пользователи не открывали чат с ботом или заблокировали его.",
-			strings.Join(ids, ", "))
+		return
 	}
-	if interrupted {
-		sb.WriteString("\n⚠️ Рассылка прервана — отправлены не все сообщения.")
+
+	msg := escapeHTML(text)
+	if warning != "" {
+		msg += "\n\n" + warning
 	}
-	return sb.String()
+	if err := h.adapter.SendMessage(ctx, chatID, msg); err != nil {
+		h.logger.Error("send announcement failed", "kind", kind.ID, "piscine", piscine, "err", err)
+	}
 }
 
-// announceCallbackGuard is the shared callback bookkeeping for the announcement
-// flows: it resolves the chat, rejects unauthorized callers, and refuses when the
-// feature is unconfigured. ok=false means it has already answered.
-func (h *Handler) announceCallbackGuard(ctx context.Context, b *bot.Bot, update *models.Update) (*models.CallbackQuery, int64, bool) {
+// renderAnnouncement builds one announcement's text. It resolves the piscine's
+// current week first — both to fill {{RAID_NAME}} and to find the defense-table
+// link — and returns a warning for the one thing the admin cannot see in the
+// text itself: a missing table link.
+func (h *Handler) renderAnnouncement(ctx context.Context, piscine domain.PiscineType, kind domain.AnnouncementKind) (text, warning string, err error) {
+	var info *usecase.CurrentWeekInfo
+	if kind.NeedsRaid || kind.NeedsSheet {
+		info, err = h.raidUC.DetectCurrentWeek(ctx, piscine)
+		if err != nil {
+			return "", "", err
+		}
+	}
+
+	extra := map[string]string{}
+	if kind.NeedsSheet {
+		week := 0
+		if info != nil {
+			week = info.WeekNumber
+		}
+		if raid, _ := info.DefenseRaid(); raid != nil && raid.WeekNumber > 0 {
+			// The table belongs to the raid's own week, which on the final-exam
+			// week is not the week the piscine has moved on to.
+			week = raid.WeekNumber
+		}
+		extra["SHEET_URL"] = h.sheetURLFor(piscine, week)
+		if extra["SHEET_URL"] == "" {
+			warning = "⚠️ Ссылка на таблицу защит не настроена — подставить в текст нечего."
+		}
+	}
+
+	text, err = h.raidUC.RenderAnnouncement(piscine, kind, info, extra)
+	if err != nil {
+		return "", "", err
+	}
+	return text, warning, nil
+}
+
+// announceRenderErrorText explains why an announcement could not be built, in
+// terms the admin can act on.
+func announceRenderErrorText(kind domain.AnnouncementKind, piscine domain.PiscineType, err error) string {
+	switch {
+	case errors.Is(err, domain.ErrNoRaidForAnnouncement):
+		return fmt.Sprintf("⚠️ У %s сейчас нет рейда, о котором можно писать — «%s» не составить.",
+			escapeHTML(string(piscine)), escapeHTML(kind.Label))
+	case errors.Is(err, domain.ErrNoActivePiscine):
+		return fmt.Sprintf("⚠️ %s сейчас не идёт — анонс по нему не составить.", escapeHTML(string(piscine)))
+	case errors.Is(err, domain.ErrTemplateNotFound):
+		return fmt.Sprintf("⚠️ Шаблон анонса «%s» не найден в messages/.", escapeHTML(kind.Label))
+	default:
+		return "⚠️ Не удалось составить анонс. Попробуйте позже."
+	}
+}
+
+// callbackGuard is the shared callback bookkeeping: it resolves the chat and
+// rejects unauthorized callers. ok=false means it has already answered.
+func (h *Handler) callbackGuard(ctx context.Context, b *bot.Bot, update *models.Update) (*models.CallbackQuery, int64, bool) {
 	cb := update.CallbackQuery
 	chatID, ok := callbackChatID(cb)
 	if !ok {
@@ -396,12 +378,22 @@ func (h *Handler) announceCallbackGuard(ctx context.Context, b *bot.Bot, update 
 		return nil, 0, false
 	}
 	if !h.isAuthorized(chatID, cb.From.ID) {
-		h.logger.Warn("unauthorized announce callback", "data", cb.Data, "chat_id", chatID, "user_id", cb.From.ID)
+		h.logger.Warn("unauthorized callback", "data", cb.Data, "chat_id", chatID, "user_id", cb.From.ID)
 		h.answer(ctx, b, cb.ID, "Недостаточно прав")
 		return nil, 0, false
 	}
+	return cb, chatID, true
+}
+
+// subscribeCallbackGuard additionally refuses when the subscription store is
+// unavailable, which is what the /subscribe toggles need.
+func (h *Handler) subscribeCallbackGuard(ctx context.Context, b *bot.Bot, update *models.Update) (*models.CallbackQuery, int64, bool) {
+	cb, chatID, ok := h.callbackGuard(ctx, b, update)
+	if !ok {
+		return nil, 0, false
+	}
 	if h.announceUC == nil {
-		h.answer(ctx, b, cb.ID, "Рассылка не настроена")
+		h.answer(ctx, b, cb.ID, "Подписки не настроены")
 		return nil, 0, false
 	}
 	return cb, chatID, true

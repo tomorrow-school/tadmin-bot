@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"admin-bot/internal/domain"
-	"admin-bot/internal/usecase"
 )
 
 // TestSubscribeText verifies the settings screen reports the three states a user
@@ -75,10 +74,11 @@ func TestSubscribeKeyboard(t *testing.T) {
 	}
 }
 
-// TestAnnounceAudienceKeyboard verifies the audience picker covers every piscine
-// plus the "everyone" option.
-func TestAnnounceAudienceKeyboard(t *testing.T) {
-	kb := announceAudienceKeyboard()
+// TestAnnouncePiscineKeyboard verifies the first /announce screen offers every
+// piscine and nothing else — the broadcast audience picker (and its "all
+// subscribers" option) is gone along with the fan-out.
+func TestAnnouncePiscineKeyboard(t *testing.T) {
+	kb := announcePiscineKeyboard()
 
 	var data []string
 	for _, row := range kb.InlineKeyboard {
@@ -86,7 +86,7 @@ func TestAnnounceAudienceKeyboard(t *testing.T) {
 			data = append(data, btn.CallbackData)
 		}
 	}
-	if want := len(domain.AllPiscines()) + 1; len(data) != want {
+	if want := len(domain.AllPiscines()); len(data) != want {
 		t.Fatalf("got %d buttons, want %d: %v", len(data), want, data)
 	}
 	for _, p := range domain.AllPiscines() {
@@ -94,9 +94,6 @@ func TestAnnounceAudienceKeyboard(t *testing.T) {
 		if !contains(data, want) {
 			t.Errorf("missing button for %q (%s)", p, want)
 		}
-	}
-	if !contains(data, cbAnnPiscine+announceAllArg) {
-		t.Error("missing the all-subscribers button")
 	}
 }
 
@@ -107,37 +104,6 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-// TestAnnounceReportText verifies the admin report states what actually
-// happened — including failed deliveries and an interrupted run, so a partial
-// broadcast is never presented as complete.
-func TestAnnounceReportText(t *testing.T) {
-	clean := announceReportText("Piscine Go", usecase.BroadcastReport{
-		Piscine: domain.PiscineGo, Recipients: 3, Sent: 3,
-	}, false)
-	if !strings.Contains(clean, "✅ Успешно: 3 из 3") {
-		t.Errorf("clean report should state the counts:\n%s", clean)
-	}
-	if strings.Contains(clean, "Не доставлено") || strings.Contains(clean, "прервана") {
-		t.Errorf("clean report should carry no warnings:\n%s", clean)
-	}
-
-	withFailures := announceReportText("Piscine Go", usecase.BroadcastReport{
-		Piscine: domain.PiscineGo, Recipients: 3, Sent: 2, FailedUsers: []int64{555},
-	}, false)
-	for _, want := range []string{"✅ Успешно: 2 из 3", "Не доставлено: 1", "555"} {
-		if !strings.Contains(withFailures, want) {
-			t.Errorf("failure report missing %q:\n%s", want, withFailures)
-		}
-	}
-
-	interrupted := announceReportText("все подписчики", usecase.BroadcastReport{
-		Recipients: 10, Sent: 4,
-	}, true)
-	if !strings.Contains(interrupted, "прервана") {
-		t.Errorf("interrupted report must say so:\n%s", interrupted)
-	}
 }
 
 func TestPiscineShortLabel(t *testing.T) {

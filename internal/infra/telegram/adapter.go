@@ -5,10 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+)
+
+// Long-polling timeouts.
+//
+// getUpdates is a long-poll: Telegram holds the connection open for
+// (pollTimeout - 1s) waiting for an update, and only then answers. The library's
+// defaults make both the poll timeout AND the HTTP client timeout 60s, leaving
+// exactly ONE second for DNS, TCP, TLS and reading the response — so on a slow
+// or proxied link every idle poll cycle dies with
+// "Client.Timeout exceeded while awaiting headers", which then floods the log
+// (the library retries with backoff, so the bot keeps working, but noisily).
+//
+// Keeping the HTTP timeout well above the poll timeout is what removes that
+// noise: the client must only ever fire when the connection is genuinely stuck.
+const (
+	pollTimeout = 30 * time.Second
+	httpTimeout = 60 * time.Second
 )
 
 // Adapter wraps the go-telegram/bot library.
@@ -21,20 +40,45 @@ type Adapter struct {
 func NewAdapter(token string, logger *slog.Logger) (*Adapter, error) {
 	a := &Adapter{token: token, logger: logger}
 
+	// http.DefaultTransport is kept (via the zero Transport field) so HTTP(S)_PROXY
+	// still applies — reaching api.telegram.org often needs it — and only the
+	// overall deadline is widened.
+	client := &http.Client{Timeout: httpTimeout}
+
 	// The go-telegram/bot library issues requests to
 	// https://api.telegram.org/bot<TOKEN>/... — the token is in the URL path.
 	// On a transport failure net/http embeds the full URL (token included) in
 	// *url.Error. The library's DEFAULT errors handler would print that during
 	// long-polling, leaking the token. Install our own scrubbing handler.
-	b, err := bot.New(token, bot.WithErrorsHandler(func(err error) {
-		logger.Error("telegram polling error", "err", a.scrub(err))
-	}))
+	b, err := bot.New(token,
+		bot.WithHTTPClient(pollTimeout, client),
+		bot.WithErrorsHandler(func(err error) {
+			// A timed-out long poll is a transient network hiccup, not a fault:
+			// the library retries it. Logging it as an error made a flaky link
+			// look like a broken bot.
+			if isTimeout(err) {
+				logger.Warn("telegram long-poll timed out, retrying", "err", a.scrub(err))
+				return
+			}
+			logger.Error("telegram polling error", "err", a.scrub(err))
+		}),
+	)
 	if err != nil {
 		// bot.New validates the token (getMe), so even this error can carry it.
 		return nil, fmt.Errorf("create telegram bot: %w", a.scrub(err))
 	}
 	a.bot = b
 	return a, nil
+}
+
+// isTimeout reports whether err is a network/deadline timeout (an http.Client
+// deadline surfaces as a *url.Error whose Timeout() is true).
+func isTimeout(err error) bool {
+	var t interface{ Timeout() bool }
+	if errors.As(err, &t) && t.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // scrub redacts the bot token from an error before it is logged or returned.

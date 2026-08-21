@@ -145,3 +145,27 @@ func TestRender_PreservesNewlines(t *testing.T) {
 		t.Errorf("Render = %q, want %q", got, want)
 	}
 }
+
+// TestAnnouncementTemplatesExist guards the /announce menu: every ready-made
+// announcement must have a file in messages/, otherwise the admin picks a
+// button and gets "шаблон не найден" instead of a text.
+func TestAnnouncementTemplatesExist(t *testing.T) {
+	loader := NewFileLoader(filepath.Join("..", "..", "..", "messages"))
+
+	// Piscine Go offers every announcement, so its list is the full catalogue.
+	for _, kind := range domain.AnnouncementKindsFor(domain.PiscineGo) {
+		text, err := loader.Render(string(kind.Message), map[string]string{
+			"RAID_NAME": "quad", "TEAMS_COUNT": "18", "SHEET_URL": "https://sheet",
+		})
+		if err != nil {
+			t.Errorf("announcement %q (%s): %v", kind.ID, kind.Message, err)
+			continue
+		}
+		if strings.TrimSpace(text) == "" {
+			t.Errorf("announcement %q (%s) renders empty", kind.ID, kind.Message)
+		}
+		if strings.Contains(text, "{{") {
+			t.Errorf("announcement %q (%s) has unresolved placeholders:\n%s", kind.ID, kind.Message, text)
+		}
+	}
+}

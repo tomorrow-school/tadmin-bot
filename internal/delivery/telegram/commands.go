@@ -32,10 +32,10 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/raidai3 — информация о рейде Piscine AI 3\n" +
 		"/raidrust — информация о рейде Piscine RUST\n" +
 		"/week — текущая неделя для всех Piscine\n" +
-		"/create_tables {бассейн} — обновить таблицу защит одного бассейна (go, js, ai1, ai2, ai3, rust)\n" +
-		"/create_tables — обновить таблицы защит всех бассейнов с идущим рейдом\n" +
+		"/create_tables {бассейн} — таблица защит одного бассейна (go, js, ai1, ai2, ai3, rust)\n" +
+		"/create_tables — таблицы защит всех бассейнов с рейдом (3 колонки × 30 мин, до 17:30)\n" +
 		"/edit_tables — создать/обновить таблицу защиты с ручными параметрами\n" +
-		"/announce — отправить анонс подписчикам выбранного бассейна\n" +
+		"/announce — получить текст анонса: выбрать бассейн (у Go — ещё и тип анонса)\n" +
 		"/subscribe — включить/отключить анонсы и выбрать бассейны\n" +
 		"/get_region_updates — статистика обновлений по всем регионам\n" +
 		"/get_astana_updates — статистика обновлений Astana\n" +
@@ -107,13 +107,18 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 		}
 
 		raidName := "—"
-		if weekInfo.ActiveRaid != nil && weekInfo.ActiveRaid.RaidName != "" {
+		switch {
+		case weekInfo.ActiveRaid != nil && weekInfo.ActiveRaid.RaidName != "":
 			raidName = weekInfo.ActiveRaid.RaidName
 			// Mark a raid that is still in registration, so "Рейд: X" is not read
 			// as "X is running now".
 			if weekInfo.RaidStatus == domain.RaidStatusUpcoming {
 				raidName += " (скоро старт)"
 			}
+		case weekInfo.RecentRaid != nil && weekInfo.RecentRaid.RaidName != "":
+			// Nothing is running, but the last raid is still being defended —
+			// that is what the admins are working on right now.
+			raidName = weekInfo.RecentRaid.RaidName + " (завершён, идёт защита)"
 		}
 
 		fmt.Fprintf(&sb, "📌 <b>%s</b> (id %d): Неделя %d | Рейд: %s\n",
@@ -127,7 +132,12 @@ func (h *Handler) HandleWeek(ctx context.Context, b *bot.Bot, update *models.Upd
 
 // HandleTables handles "/create_tables [бассейн]".
 //
-// With no argument it still covers every piscine with a running raid, but it no
+// The layout is entirely automatic: 3 columns of 30-minute slots, no breaks,
+// ending at 17:30, with as many rows as the team count needs (20 teams → 7
+// rows). Only the raid has to be resolved — the running one, or the one that
+// just ended, since defenses happen after a raid finishes.
+//
+// With no argument it still covers every piscine with such a raid, but it no
 // longer writes blindly: targets are resolved first and any two that would land
 // in the SAME spreadsheet are refused, because the second write would wipe the
 // first one's defense table. With an argument ("/create_tables go") exactly one
@@ -150,17 +160,14 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 		return
 	}
 
-	// Defense is on Monday — computed in the configured timezone so the date
-	// matches what admins see locally regardless of the container clock.
-	defenseDate := nextMonday(h.now())
-
-	targets, lines := h.planTableUpdates(ctx, piscines)
+	targets, lines, skips := h.planTableUpdates(ctx, piscines)
 	targets, conflicts := rejectConflictingTargets(targets)
 	lines = append(lines, conflicts...)
+	lines = append(lines, skipLines(skips, len(piscines) == 1)...)
 
 	updatedCount := 0
 	for _, t := range targets {
-		res, err := h.updateTableForActiveRaid(ctx, t.spreadsheetID, t.raid, defenseDate)
+		res, err := h.updateTableForActiveRaid(ctx, t.spreadsheetID, t.raid, t.defenseDate)
 		if err != nil {
 			h.logger.Error("update defense table failed", "piscine", t.piscine, "raid", t.raid.RaidName, "err", err)
 			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", t.piscine))
@@ -168,8 +175,14 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 		}
 
 		updatedCount++
-		line := fmt.Sprintf("✅ Таблица обновлена (%s — %s): %s",
-			escapeHTML(string(t.piscine)), escapeHTML(t.raid.RaidName), res.URL)
+		line := fmt.Sprintf("✅ Таблица обновлена (%s — %s, защита %s): %s",
+			escapeHTML(string(t.piscine)), escapeHTML(t.raid.RaidName),
+			t.defenseDate.Format("02.01"), res.URL)
+		if t.ended {
+			// The raid is over, so students may already have signed up in this
+			// document — and the update rewrites it from scratch.
+			line += "\n⚠️ Рейд уже завершён: таблица перестроена заново, прежние записи в ней очищены."
+		}
 		if res.FormatFailed {
 			line += "\n" + msgFormattingFailed
 		}
@@ -179,7 +192,7 @@ func (h *Handler) HandleTables(ctx context.Context, b *bot.Bot, update *models.U
 		lines = append(lines, line)
 	}
 
-	resp := "ℹ️ Сейчас нет идущих рейдов — обновлять нечего."
+	resp := "ℹ️ Сейчас нет рейдов, для которых нужна таблица защит."
 	if len(lines) > 0 {
 		resp = strings.Join(lines, "\n")
 	}
@@ -198,6 +211,36 @@ type tableTarget struct {
 	week          int
 	raid          *domain.RaidInfo
 	spreadsheetID string
+	defenseDate   time.Time
+	ended         bool // the raid has finished; the table is being rebuilt after the fact
+}
+
+// skipNote records a piscine /create_tables did not write, and why. Notes are
+// summarized rather than printed one per line when the admin asked for every
+// piscine at once — six "nothing to do" lines would bury the real results.
+type skipNote struct {
+	piscine domain.PiscineType
+	reason  string
+}
+
+// skipLines renders the skip notes. verbose (a single-piscine request) spells
+// each one out; otherwise they collapse into one summary line.
+func skipLines(skips []skipNote, verbose bool) []string {
+	if len(skips) == 0 {
+		return nil
+	}
+	if verbose {
+		out := make([]string, 0, len(skips))
+		for _, s := range skips {
+			out = append(out, fmt.Sprintf("ℹ️ %s — %s", escapeHTML(string(s.piscine)), s.reason))
+		}
+		return out
+	}
+	parts := make([]string, 0, len(skips))
+	for _, s := range skips {
+		parts = append(parts, fmt.Sprintf("%s (%s)", escapeHTML(piscineArgFor(s.piscine)), s.reason))
+	}
+	return []string{"ℹ️ Пропущены: " + strings.Join(parts, ", ")}
 }
 
 // planTableUpdates resolves each requested piscine to a write target, returning
@@ -205,38 +248,68 @@ type tableTarget struct {
 // skipped (no raid, registration still open, no sheet configured, upstream
 // error). Nothing is written here — resolving first is what makes the
 // same-document check below possible.
-func (h *Handler) planTableUpdates(ctx context.Context, piscines []domain.PiscineType) ([]tableTarget, []string) {
+func (h *Handler) planTableUpdates(ctx context.Context, piscines []domain.PiscineType) ([]tableTarget, []string, []skipNote) {
 	var targets []tableTarget
 	var lines []string
+	var skips []skipNote
 
 	for _, piscine := range piscines {
 		weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
 		if err != nil {
+			// A piscine that simply is not running is a normal state, not a
+			// failure — reporting both as "❌ Ошибка при обновлении таблицы" is
+			// what made this command impossible to diagnose.
+			if errors.Is(err, domain.ErrNoActivePiscine) {
+				h.logger.Info("skip: piscine not running", "piscine", piscine)
+				skips = append(skips, skipNote{piscine, "бассейн сейчас не идёт"})
+				continue
+			}
 			h.logger.Warn("detect week failed", "piscine", piscine, "err", err)
-			lines = append(lines, fmt.Sprintf("❌ Ошибка при обновлении таблицы (%s)", piscine))
+			lines = append(lines, fmt.Sprintf("❌ %s — не удалось получить данные о рейде.", escapeHTML(string(piscine))))
 			continue
 		}
 
-		if weekInfo.ActiveRaid == nil {
-			h.logger.Info("skip: no active raid", "piscine", piscine)
+		// The raid to schedule defenses for: the running one, or the one that
+		// just ended — defenses happen after a raid finishes, so the table is
+		// still wanted for the rest of that week.
+		raid, status := weekInfo.DefenseRaid()
+		if raid == nil {
+			// Registration window: ActiveRaid holds the NEXT raid, which has no
+			// teams yet, so there is nothing to schedule. Say so instead of
+			// silently writing a table for a raid that hasn't started.
+			if weekInfo.ActiveRaid != nil && weekInfo.RaidStatus == domain.RaidStatusUpcoming {
+				h.logger.Info("skip: raid not started", "piscine", piscine,
+					"raid", weekInfo.ActiveRaid.RaidName, "status", weekInfo.RaidStatus)
+				lines = append(lines, notStartedLine(piscine, weekInfo.ActiveRaid))
+				continue
+			}
+			h.logger.Info("skip: no raid to defend", "piscine", piscine, "week", weekInfo.WeekNumber)
+			skips = append(skips, skipNote{piscine, "нет рейда для защиты"})
 			continue
 		}
 
-		// Registration window: ActiveRaid holds the NEXT raid, which has no teams
-		// yet, so there is nothing to schedule. Say so instead of silently writing
-		// a table for a raid that hasn't started.
-		if !weekInfo.RaidStatus.AllowsDefenseTable() {
-			h.logger.Info("skip: raid not started", "piscine", piscine,
-				"raid", weekInfo.ActiveRaid.RaidName, "status", weekInfo.RaidStatus)
-			lines = append(lines, notStartedLine(piscine, weekInfo.ActiveRaid))
+		// A raid with no teams would produce a header and nothing else — and the
+		// write wipes whatever the document held. Refuse instead.
+		if raid.TeamsCount <= 0 {
+			h.logger.Info("skip: raid has no teams", "piscine", piscine, "raid", raid.RaidName)
+			lines = append(lines, fmt.Sprintf(
+				"⚠️ %s — у рейда «%s» пока нет команд, таблицу защит не из чего строить. Пустую сетку можно сделать через /edit_tables.",
+				escapeHTML(string(piscine)), escapeHTML(raid.RaidName)))
 			continue
 		}
 
-		spreadsheetID, dedicated := h.resolveSpreadsheetID(piscine, weekInfo.WeekNumber)
+		// A finished raid belongs to its own week, not to the (later) week the
+		// piscine has moved on to — its defense table lives in that week's sheet.
+		week := weekInfo.WeekNumber
+		if status == domain.RaidStatusEnded && raid.WeekNumber > 0 {
+			week = raid.WeekNumber
+		}
+
+		spreadsheetID, dedicated := h.resolveSpreadsheetID(piscine, week)
 		if spreadsheetID == "" {
-			h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)
+			h.logger.Warn("no sheet configured", "piscine", piscine, "week", week, "dedicated", dedicated)
 			if dedicated {
-				lines = append(lines, fmt.Sprintf("⚠️ %s — таблица для недели %d не настроена", piscine, weekInfo.WeekNumber))
+				lines = append(lines, fmt.Sprintf("⚠️ %s — таблица для недели %d не настроена", piscine, week))
 			} else {
 				lines = append(lines, fmt.Sprintf("⚠️ %s — универсальная таблица (SHEET_UNIVERSAL) не настроена", piscine))
 			}
@@ -245,13 +318,15 @@ func (h *Handler) planTableUpdates(ctx context.Context, piscines []domain.Piscin
 
 		targets = append(targets, tableTarget{
 			piscine:       piscine,
-			week:          weekInfo.WeekNumber,
-			raid:          weekInfo.ActiveRaid,
+			week:          week,
+			raid:          raid,
 			spreadsheetID: spreadsheetID,
+			defenseDate:   defenseDateFor(raid, h.now()),
+			ended:         status == domain.RaidStatusEnded,
 		})
 	}
 
-	return targets, lines
+	return targets, lines, skips
 }
 
 // rejectConflictingTargets drops every target that shares a spreadsheet with
@@ -500,41 +575,19 @@ func (h *Handler) handleRaidInfo(ctx context.Context, update *models.Update, pis
 
 	weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, piscine)
 	if err != nil {
+		if errors.Is(err, domain.ErrNoActivePiscine) {
+			h.logger.Info("raid info: piscine not running", "piscine", piscine)
+			_ = h.adapter.SendMessage(ctx, chatID, fmt.Sprintf(
+				"ℹ️ <b>%s</b> сейчас не идёт — на платформе нет активного бассейна.",
+				escapeHTML(string(piscine))))
+			return
+		}
 		h.logger.Error("detect week failed", "piscine", piscine, "err", err)
 		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось определить текущую неделю. Попробуйте позже.")
 		return
 	}
 
-	if weekInfo.ActiveRaid == nil {
-		text := fmt.Sprintf("📌 <b>%s</b> — Неделя %d (Final Exam)\nАктивных рейдов нет.",
-			escapeHTML(string(piscine)), weekInfo.WeekNumber)
-		_ = h.adapter.SendMessage(ctx, chatID, text)
-		return
-	}
-
-	raid := weekInfo.ActiveRaid
-	// The raid may still be in its registration window, in which case it is the
-	// NEXT raid rather than a running one — label it so, otherwise the message
-	// reads as if defenses were already being scheduled.
-	status := "⚔️ Рейд"
-	if weekInfo.RaidStatus == domain.RaidStatusUpcoming {
-		status = "⏳ Рейд (ещё не начался)"
-	}
-	text := fmt.Sprintf(
-		"📌 <b>%s</b> — Неделя %d\n"+
-			"%s: <b>%s</b>\n"+
-			"👥 Команд: %d\n"+
-			"📅 %s — %s",
-		escapeHTML(string(piscine)),
-		weekInfo.WeekNumber,
-		status,
-		escapeHTML(raid.RaidName),
-		raid.TeamsCount,
-		raid.StartDate.Format("02.01 15:04"),
-		raid.EndDate.Format("02.01 15:04"),
-	)
-
-	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
+	if err := h.adapter.SendMessage(ctx, chatID, raidInfoText(piscine, weekInfo, h.loc)); err != nil {
 		h.logger.Error("send raid info failed", "err", err)
 	}
 }

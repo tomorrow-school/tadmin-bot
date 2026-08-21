@@ -26,8 +26,6 @@ type UpdatesUseCase struct {
 	leadClient domain.LeadClient
 }
 
-type AstanaUpdatesUseCase = UpdatesUseCase
-
 func NewUpdatesUseCase(eduClient domain.OneEduClient, regionEvents map[string]domain.RegionUpdateEventsConfig, leadClient domain.LeadClient) *UpdatesUseCase {
 	if regionEvents == nil {
 		regionEvents = map[string]domain.RegionUpdateEventsConfig{}
@@ -37,10 +35,6 @@ func NewUpdatesUseCase(eduClient domain.OneEduClient, regionEvents map[string]do
 		regionEvents: regionEvents,
 		leadClient:   leadClient,
 	}
-}
-
-func NewAstanaUpdatesUseCase(eduClient domain.OneEduClient) *AstanaUpdatesUseCase {
-	return NewUpdatesUseCase(eduClient, nil, nil)
 }
 
 // eventsForRegion returns the pinned event-ID config for a campus, or a

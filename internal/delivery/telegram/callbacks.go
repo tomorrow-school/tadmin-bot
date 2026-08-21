@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-telegram/bot"
@@ -42,24 +43,41 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 	}
 
 	weekInfo, err := h.raidUC.DetectCurrentWeek(ctx, domain.PiscineType(piscine))
-	if err != nil || weekInfo.ActiveRaid == nil {
-		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось получить данные о рейде.")
+	if err != nil {
+		h.logger.Error("detect week failed", "piscine", piscine, "err", err)
+		msg := "⚠️ Не удалось получить данные о рейде."
+		if errors.Is(err, domain.ErrNoActivePiscine) {
+			msg = fmt.Sprintf("ℹ️ %s сейчас не идёт — таблицу защит создавать не для чего.", escapeHTML(piscine))
+		}
+		_ = h.adapter.SendMessage(ctx, chatID, msg)
 		return
 	}
 
-	// Same rule as /create_tables: no defense table while registration is open.
-	if !weekInfo.RaidStatus.AllowsDefenseTable() {
-		h.logger.Info("skip table update: raid not started", "piscine", piscine,
-			"raid", weekInfo.ActiveRaid.RaidName, "status", weekInfo.RaidStatus)
-		_ = h.adapter.SendMessage(ctx, chatID,
-			notStartedLine(domain.PiscineType(piscine), weekInfo.ActiveRaid)+
-				"\n\nЕсли таблица нужна заранее — используйте /edit_tables.")
+	// Same rule as /create_tables: the table is built for the running raid or
+	// the one that just ended (defenses follow the raid), never for a raid whose
+	// registration is still open — it has no teams yet.
+	raid, status := weekInfo.DefenseRaid()
+	if raid == nil {
+		if weekInfo.ActiveRaid != nil && weekInfo.RaidStatus == domain.RaidStatusUpcoming {
+			h.logger.Info("skip table update: raid not started", "piscine", piscine,
+				"raid", weekInfo.ActiveRaid.RaidName, "status", weekInfo.RaidStatus)
+			_ = h.adapter.SendMessage(ctx, chatID,
+				notStartedLine(domain.PiscineType(piscine), weekInfo.ActiveRaid)+
+					"\n\nЕсли таблица нужна заранее — используйте /edit_tables.")
+			return
+		}
+		_ = h.adapter.SendMessage(ctx, chatID, "ℹ️ Нет рейда, для которого нужна таблица защит.")
 		return
 	}
 
-	spreadsheetID, dedicated := h.resolveSpreadsheetID(domain.PiscineType(piscine), weekInfo.WeekNumber)
+	week := weekInfo.WeekNumber
+	if status == domain.RaidStatusEnded && raid.WeekNumber > 0 {
+		week = raid.WeekNumber
+	}
+
+	spreadsheetID, dedicated := h.resolveSpreadsheetID(domain.PiscineType(piscine), week)
 	if spreadsheetID == "" {
-		h.logger.Warn("no sheet configured", "piscine", piscine, "week", weekInfo.WeekNumber, "dedicated", dedicated)
+		h.logger.Warn("no sheet configured", "piscine", piscine, "week", week, "dedicated", dedicated)
 		msg := msgSheetNotConfigured
 		if !dedicated {
 			msg = msgUniversalSheetNotConfigured
@@ -68,8 +86,7 @@ func (h *Handler) HandleCallbackCreateTable(ctx context.Context, b *bot.Bot, upd
 		return
 	}
 
-	raid := weekInfo.ActiveRaid
-	res, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, nextMonday(h.now()))
+	res, err := h.updateTableForActiveRaid(ctx, spreadsheetID, raid, defenseDateFor(raid, h.now()))
 	if err != nil {
 		h.logger.Error("update defense table failed", "err", err)
 		_ = h.adapter.SendMessage(ctx, chatID, "⚠️ Не удалось обновить таблицу. Попробуйте позже.")

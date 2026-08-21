@@ -63,10 +63,6 @@ func (h *Handler) HandleCancel(ctx context.Context, b *bot.Bot, update *models.U
 		_ = h.adapter.SendMessage(ctx, chatID, "❌ Диалог настройки таблицы отменён.")
 		return
 	}
-	if h.announceSessions.clear(chatID) {
-		_ = h.adapter.SendMessage(ctx, chatID, "❌ Анонс отменён, ничего не отправлено.")
-		return
-	}
 	_ = h.adapter.SendMessage(ctx, chatID, "ℹ️ Нет активного диалога для отмены.")
 }
 

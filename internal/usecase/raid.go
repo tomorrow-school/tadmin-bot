@@ -48,6 +48,34 @@ type CurrentWeekInfo struct {
 	// RaidStatus distinguishes registration (Upcoming) from a running raid
 	// (Active) and a finished one (Ended). None means no raid at all.
 	RaidStatus domain.RaidStatus
+
+	// HasRaids reports whether the piscine has any raid events at all. A running
+	// piscine whose raids have not been created on the platform yet has none —
+	// and must NOT be described as being on its final-exam week.
+	HasRaids bool
+
+	// RecentRaid is the raid that finished most recently and whose defense is
+	// still ahead or under way — defenses happen after the raid ends, so its
+	// data stays relevant through the Friday of the week it ended (see
+	// DefenseWindowEnd). It is nil once that window closes, and it is never the
+	// raid already reported through ActiveRaid.
+	RecentRaid *domain.RaidInfo
+}
+
+// DefenseRaid returns the raid a defense table should be built for: the running
+// one, or — between raids and on the final-exam week — the one that just ended
+// and whose defense window is still open. nil means there is nothing to schedule.
+func (i *CurrentWeekInfo) DefenseRaid() (*domain.RaidInfo, domain.RaidStatus) {
+	if i == nil {
+		return nil, domain.RaidStatusNone
+	}
+	if i.ActiveRaid != nil && i.RaidStatus.AllowsDefenseTable() {
+		return i.ActiveRaid, i.RaidStatus
+	}
+	if i.RecentRaid != nil {
+		return i.RecentRaid, domain.RaidStatusEnded
+	}
+	return nil, domain.RaidStatusNone
 }
 
 // DetectCurrentWeek determines which week it is for a given piscine.
@@ -59,7 +87,9 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 		return nil, fmt.Errorf("get piscine ID: %w", err)
 	}
 	if piscineInfo == nil {
-		return nil, fmt.Errorf("no active piscine found for %s", piscine)
+		// Not a failure: the piscine simply is not running right now. Callers
+		// distinguish it from an upstream error via errors.Is.
+		return nil, fmt.Errorf("%w: %s", domain.ErrNoActivePiscine, piscine)
 	}
 
 	raids, err := uc.eduClient.GetRaidsByPiscineID(ctx, piscine, piscineInfo.ID)
@@ -77,20 +107,12 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 			WeekNumber:  active.WeekNumber,
 			ActiveRaid:  active,
 			RaidStatus:  domain.RaidStatusActive,
+			HasRaids:    true,
+			RecentRaid:  findRecentlyEndedRaid(raids, now),
 		}, nil
 	}
 
-	// No active raid. If every raid has ended, it's the final-exam week.
-	// (Final week has no raid, so total raid weeks = TotalWeeks-1.)
-	totalRaidWeeks := domain.TotalWeeks(piscine) - 1
-	if countEndedRaids(raids, now) >= totalRaidWeeks {
-		return &CurrentWeekInfo{
-			PiscineInfo: piscineInfo,
-			WeekNumber:  domain.TotalWeeks(piscine),
-			ActiveRaid:  nil,
-			RaidStatus:  domain.RaidStatusNone,
-		}, nil
-	}
+	recent := findRecentlyEndedRaid(raids, now)
 
 	// We're between raids; the upcoming raid tells us which week we're in. Its
 	// registration window is still open, hence RaidStatusUpcoming — the raid in
@@ -101,10 +123,38 @@ func (uc *RaidUseCase) DetectCurrentWeek(ctx context.Context, piscine domain.Pis
 			WeekNumber:  next.WeekNumber,
 			ActiveRaid:  next,
 			RaidStatus:  domain.RaidStatusUpcoming,
+			HasRaids:    true,
+			RecentRaid:  recent,
 		}, nil
 	}
 
-	return nil, fmt.Errorf("could not determine current week for %s", piscine)
+	// A running piscine with no raid events at all: the week is simply unknown
+	// (they are usually created as the cohort progresses). Reporting it as the
+	// final-exam week would be a plain lie, so leave the number at 0 and let
+	// HasRaids tell callers why.
+	if len(raids) == 0 {
+		return &CurrentWeekInfo{
+			PiscineInfo: piscineInfo,
+			WeekNumber:  0,
+			RaidStatus:  domain.RaidStatusNone,
+			HasRaids:    false,
+		}, nil
+	}
+
+	// Nothing running and nothing coming: the piscine is on its final-exam week.
+	// The week number is derived from the raids that actually exist rather than
+	// from TotalWeeks-1 — a cohort with fewer raids than the programme table
+	// assumes (the AI streams run two) used to fall through every branch here
+	// and fail with "could not determine current week", which is what turned
+	// /create_tables into "❌ Ошибка при обновлении таблицы".
+	return &CurrentWeekInfo{
+		PiscineInfo: piscineInfo,
+		WeekNumber:  finalWeekNumber(piscine, raids),
+		ActiveRaid:  nil,
+		RaidStatus:  domain.RaidStatusNone,
+		HasRaids:    true,
+		RecentRaid:  recent,
+	}, nil
 }
 
 // GetCurrentPiscines returns every currently active piscine discovered by path.
@@ -131,6 +181,10 @@ type EventWeekInfo struct {
 	ActiveRaid *domain.RaidInfo
 	RaidStatus domain.RaidStatus
 	HasRaids   bool
+
+	// RecentRaid carries the same meaning as CurrentWeekInfo.RecentRaid: the
+	// just-finished raid whose defense window is still open.
+	RecentRaid *domain.RaidInfo
 }
 
 // DetectCurrentWeekForEvent determines the current week of a discovered piscine
@@ -157,17 +211,11 @@ func (uc *RaidUseCase) DetectCurrentWeekForEvent(ctx context.Context, event doma
 		return &EventWeekInfo{
 			Event: event, WeekNumber: active.WeekNumber, ActiveRaid: active,
 			RaidStatus: domain.RaidStatusActive, HasRaids: true,
+			RecentRaid: findRecentlyEndedRaid(raids, now),
 		}, nil
 	}
 
-	// No active raid. If every raid has ended, we're on the final-exam week,
-	// numbered one past the last raid.
-	if countEndedRaids(raids, now) >= len(raids) {
-		return &EventWeekInfo{
-			Event: event, WeekNumber: len(raids) + 1, ActiveRaid: nil,
-			RaidStatus: domain.RaidStatusNone, HasRaids: true,
-		}, nil
-	}
+	recent := findRecentlyEndedRaid(raids, now)
 
 	// Between raids: the next upcoming raid tells us the week. Registration is
 	// still open, so the status is Upcoming, not Active.
@@ -175,14 +223,16 @@ func (uc *RaidUseCase) DetectCurrentWeekForEvent(ctx context.Context, event doma
 		return &EventWeekInfo{
 			Event: event, WeekNumber: next.WeekNumber, ActiveRaid: next,
 			RaidStatus: domain.RaidStatusUpcoming, HasRaids: true,
+			RecentRaid: recent,
 		}, nil
 	}
 
-	// Shouldn't happen (not active, not all ended, none upcoming), but fall back
-	// to week 1 rather than erroring on a discovered piscine.
+	// Nothing running and nothing coming: the final-exam week, numbered one past
+	// the last raid.
 	return &EventWeekInfo{
-		Event: event, WeekNumber: 1, ActiveRaid: nil,
+		Event: event, WeekNumber: len(raids) + 1, ActiveRaid: nil,
 		RaidStatus: domain.RaidStatusNone, HasRaids: true,
+		RecentRaid: recent,
 	}, nil
 }
 
@@ -224,10 +274,26 @@ func (uc *RaidUseCase) ListRaidsForEvent(ctx context.Context, eventID int) ([]do
 // the edu client during mapping; those without one (e.g. Rust, fetched via the
 // generic parent-ID query) are numbered by raid order here. Centralizing this
 // rule keeps DetectCurrentWeek and ListRaidsWithWeeks in agreement.
+//
+// A mapped piscine can still arrive unnumbered: when a cohort renames its raids
+// (Piscine AI 1 running wine-pca-analysis instead of backtesting-sp500) the map
+// yields week 0 for every one of them. Ordering by start date is the only thing
+// left to go on, so fall back to it — the same rule the discovered pools use.
 func assignWeekNumbers(piscine domain.PiscineType, raids []domain.RaidInfo) {
-	if len(domain.RaidWeekMap[piscine]) == 0 {
+	if len(domain.RaidWeekMap[piscine]) == 0 || hasUnnumberedRaid(raids) {
 		assignOrdinalWeeks(raids)
 	}
+}
+
+// hasUnnumberedRaid reports whether any raid lacks a week number, i.e. its name
+// is absent from the piscine's raid-name→week map.
+func hasUnnumberedRaid(raids []domain.RaidInfo) bool {
+	for i := range raids {
+		if raids[i].WeekNumber == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // assignOrdinalWeeks sorts raids by start date and numbers them 1..N. Used for
@@ -255,15 +321,57 @@ func findActiveRaid(raids []domain.RaidInfo, now time.Time) *domain.RaidInfo {
 	return nil
 }
 
-// countEndedRaids returns the number of raids whose EndDate is strictly before now.
-func countEndedRaids(raids []domain.RaidInfo, now time.Time) int {
-	n := 0
+// finalWeekNumber is the week number of the final-exam week: one past the last
+// raid, or the programme's nominal length when that is later. Deriving it from
+// the raids keeps week detection working for a cohort whose raid count differs
+// from what domain.TotalWeeks assumes.
+func finalWeekNumber(piscine domain.PiscineType, raids []domain.RaidInfo) int {
+	week := domain.TotalWeeks(piscine) // 0 for an unknown piscine
+
 	for i := range raids {
-		if raids[i].EndDate.Before(now) {
-			n++
+		if w := raids[i].WeekNumber + 1; w > week {
+			week = w
 		}
 	}
-	return n
+	if week < 1 {
+		week = 1
+	}
+	return week
+}
+
+// DefenseWindowEnd returns the moment a finished raid stops being the current
+// subject: the end of the Friday on or after its end date.
+//
+// Defenses happen AFTER the raid ends — a raid running Saturday-to-Monday is
+// defended during the days that follow — so the bot has to keep reporting it
+// (and keep building its defense table) until that week is over. Before this,
+// a raid that ended on Monday vanished from /raidgo the same day.
+func DefenseWindowEnd(end time.Time) time.Time {
+	daysUntilFriday := (int(time.Friday) - int(end.Weekday()) + 7) % 7
+	friday := end.AddDate(0, 0, daysUntilFriday)
+	return time.Date(friday.Year(), friday.Month(), friday.Day(), 23, 59, 59, 0, friday.Location())
+}
+
+// findRecentlyEndedRaid returns the most recently finished raid whose defense
+// window (through the Friday of the week it ended) is still open, or nil.
+func findRecentlyEndedRaid(raids []domain.RaidInfo, now time.Time) *domain.RaidInfo {
+	var best *domain.RaidInfo
+	for i := range raids {
+		r := raids[i]
+		if !r.EndDate.Before(now) {
+			continue // still running, or not started
+		}
+		// Compute the window in the caller's timezone so the Friday cut-off is
+		// the local one, not the one the API happens to serialize with.
+		if now.After(DefenseWindowEnd(r.EndDate.In(now.Location()))) {
+			continue
+		}
+		if best == nil || r.EndDate.After(best.EndDate) {
+			rCopy := r
+			best = &rCopy
+		}
+	}
+	return best
 }
 
 // findNextUpcomingRaid returns the earliest-starting raid whose StartDate is

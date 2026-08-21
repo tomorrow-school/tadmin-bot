@@ -3,6 +3,7 @@ package oneedu
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,14 +28,44 @@ func (c *Client) GetCurrentPiscineID(ctx context.Context, piscine domain.Piscine
 	return &domain.PiscineInfo{ID: ev.ID, StartAt: ev.StartAt, EndAt: ev.EndAt}, nil
 }
 
+// genericRaidQuery fetches every raid child of an event with no name filter.
+const genericRaidQuery = "GetRaidsByParentId"
+
 // GetRaidsByPiscineID fetches all raid events for a given piscine event ID.
+//
+// The per-piscine queries filter raids by hardcoded names (quad/sudoku/... for
+// Go, backtesting-sp500/forest-prediction for AI). When a cohort renames its
+// raids — Piscine AI 1 now runs wine-pca-analysis, AI 2 titanic-survival — that
+// filter matches nothing and the piscine looks raid-less, even though the
+// path-based discovery behind /week sees the raids fine. So an empty result falls
+// back to the unfiltered parent-ID query, which is what Piscine RUST and the
+// dynamically discovered pools use anyway.
 func (c *Client) GetRaidsByPiscineID(ctx context.Context, piscine domain.PiscineType, piscineEventID int) ([]domain.RaidInfo, error) {
 	opName := domain.GetRaidQueryName(piscine)
 	if opName == "" {
 		return nil, fmt.Errorf("%w: %s", domain.ErrPiscineNotFound, piscine)
 	}
 
-	vars := map[string]interface{}{"id": piscineEventID}
+	raids, err := c.fetchRaids(ctx, opName, piscine, piscineEventID)
+	if err != nil {
+		return nil, err
+	}
+	// Either the filter matched, or it was never a filtered query to begin with
+	// (RUST already resolves to the generic one) — nothing left to retry.
+	if len(raids) > 0 || opName == genericRaidQuery {
+		return raids, nil
+	}
+
+	c.logger.Warn("no raids matched the per-piscine name filter, retrying without it",
+		"piscine", piscine, "query", opName, "piscine_event_id", piscineEventID)
+	return c.fetchRaids(ctx, genericRaidQuery, piscine, piscineEventID)
+}
+
+// fetchRaids runs a raid query for one parent event and maps the result. piscine
+// is carried into the mapping so the raids know which piscine they belong to;
+// pass "" when the caller has no fixed PiscineType (path-discovered pools).
+func (c *Client) fetchRaids(ctx context.Context, opName string, piscine domain.PiscineType, parentEventID int) ([]domain.RaidInfo, error) {
+	vars := map[string]interface{}{"id": parentEventID}
 
 	var resp raidsResponse
 	if err := c.runQuery(ctx, opName, vars, &resp); err != nil {
@@ -86,18 +117,7 @@ func (c *Client) listPiscines(ctx context.Context, opName string, vars map[strin
 // filtering by raid name. Week numbers are left at 0 here — callers assign them
 // from the raid ordering (see usecase.DetectCurrentWeekForEvent).
 func (c *Client) GetRaidsByParentID(ctx context.Context, parentEventID int) ([]domain.RaidInfo, error) {
-	vars := map[string]interface{}{"id": parentEventID}
-
-	var resp raidsResponse
-	if err := c.runQuery(ctx, "GetRaidsByParentId", vars, &resp); err != nil {
-		return nil, err
-	}
-
-	raids := make([]domain.RaidInfo, 0, len(resp.Data.Event))
-	for _, ev := range resp.Data.Event {
-		raids = append(raids, mapEventToRaidInfo("", ev))
-	}
-	return raids, nil
+	return c.fetchRaids(ctx, genericRaidQuery, "", parentEventID)
 }
 
 // GetRegistrationCountByPath counts user registrations on an arbitrary event
@@ -288,9 +308,13 @@ func (c *Client) resolvePinnedEvents(
 		typ    domain.EventType
 		id     int
 		varKey string
+		// toVar adapts the verified event path to what the query variable
+		// expects: a plain path for corePath, an anchored pattern for the
+		// regex-matched check-in.
+		toVar func(path string) string
 	}{
-		{domain.EventCheckin, events.CheckinEventID, "checkinPath"},
-		{domain.EventModule, events.ModuleEventID, "corePath"},
+		{domain.EventCheckin, events.CheckinEventID, "checkinPathRegex", exactPathPattern},
+		{domain.EventModule, events.ModuleEventID, "corePath", func(p string) string { return p }},
 	}
 
 	var stale []domain.StaleEvent
@@ -317,7 +341,7 @@ func (c *Client) resolvePinnedEvents(
 
 		// Verified and active: pin the authoritative path for counting.
 		if status.Path != "" {
-			vars[p.varKey] = status.Path
+			vars[p.varKey] = p.toVar(status.Path)
 		}
 	}
 	return stale
@@ -348,14 +372,35 @@ func classifyPinnedEvent(campus string, meta *domain.EventMeta, now time.Time) p
 func buildRegionStatsVariables(region string, startDate, endDate time.Time) map[string]interface{} {
 	region = strings.TrimSpace(region)
 	return map[string]interface{}{
-		"campus":      region,
-		"startDate":   startDate.Format(time.RFC3339),
-		"endDate":     endDate.Format(time.RFC3339),
-		"adminRole":   "campus_admin_" + region,
-		"gamesPath":   "/" + region + "/onboarding/games",
-		"checkinPath": "/" + region + "/onboarding/checkin",
-		"corePath":    "/" + region + "/module",
+		"campus":    region,
+		"startDate": startDate.Format(time.RFC3339),
+		"endDate":   endDate.Format(time.RFC3339),
+		"adminRole": "campus_admin_" + region,
+		// games and module ARE spelled identically across campuses (verified
+		// against the platform), so they stay exact matches.
+		"gamesPath":        "/" + region + "/onboarding/games",
+		"checkinPathRegex": checkinPathPattern(region),
+		"corePath":         "/" + region + "/module",
 	}
+}
+
+// checkinPathPattern is the anchored pattern for a campus's check-in
+// registration path.
+//
+// The spelling is not uniform on the platform: Pavlodar's event lives at
+// /pavlodar/onboarding/check-in while every other campus uses
+// /<campus>/onboarding/checkin. An exact comparison therefore matched nothing
+// for Pavlodar and the region report showed 0 registrations instead of its real
+// count. The optional hyphen covers both spellings without hardcoding a
+// per-campus exception; the anchors keep it from matching a longer path.
+func checkinPathPattern(region string) string {
+	return "^/" + regexp.QuoteMeta(region) + "/onboarding/check-?in$"
+}
+
+// exactPathPattern turns a known path into a pattern that matches only that
+// path, so a pinned event ID still counts exactly its own registrations.
+func exactPathPattern(path string) string {
+	return "^" + regexp.QuoteMeta(path) + "$"
 }
 
 func mapRegionUpdates(region string, data regionUpdatesNode) (*domain.RegionUpdatesInfo, error) {
