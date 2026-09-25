@@ -34,7 +34,8 @@ func formatRegionUpdatesMessage(info domain.RegionUpdatesInfo, date string) stri
 
 // writePiscineRegistrations renders one line per discovered piscine (current
 // and upcoming), showing its module/curriculum path. Upcoming piscines are
-// annotated with their start date.
+// annotated with their start date; a running one also reports how many
+// participants are enrolled (see PiscineRegistrationCount.Participants).
 func writePiscineRegistrations(sb *strings.Builder, regs []domain.PiscineRegistrationCount) {
 	for _, r := range regs {
 		label := r.Label
@@ -44,6 +45,11 @@ func writePiscineRegistrations(sb *strings.Builder, regs []domain.PiscineRegistr
 		if r.Upcoming {
 			fmt.Fprintf(sb, "- %d reg на %s (скоро старт: %s)\n",
 				r.Count, escapeHTML(label), r.StartAt.Format("02.01"))
+			continue
+		}
+		if r.HasParticipants {
+			fmt.Fprintf(sb, "- %d reg на %s (участников: %d)\n",
+				r.Count, escapeHTML(label), r.Participants)
 			continue
 		}
 		fmt.Fprintf(sb, "- %d reg на %s\n", r.Count, escapeHTML(label))

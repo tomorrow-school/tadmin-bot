@@ -38,6 +38,13 @@ type registrationCountResponse struct {
 	} `json:"data"`
 }
 
+// participantCountResponse is the response for GetParticipantCountByPath.
+type participantCountResponse struct {
+	Data struct {
+		Participants aggregateCountNode `json:"participants"`
+	} `json:"data"`
+}
+
 // raidsResponse is the response for GetRaidsByPiscine*Id and GetRaidByName.
 type raidsResponse struct {
 	Data struct {

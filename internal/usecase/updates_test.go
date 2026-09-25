@@ -23,6 +23,10 @@ type fakeUpdatesClient struct {
 	upcoming    []domain.PiscineEvent
 	regByPath   map[string]int // path -> registration count
 	pathCounted []string       // paths passed to GetRegistrationCountByPath
+
+	partByPath      map[string]int // path -> participant count
+	partErr         error          // when set, GetParticipantCountByPath fails
+	partPathCounted []string       // paths passed to GetParticipantCountByPath
 }
 
 func (f *fakeUpdatesClient) RefreshToken(ctx context.Context) error {
@@ -56,6 +60,14 @@ func (f *fakeUpdatesClient) GetRaidsByParentID(ctx context.Context, parentEventI
 func (f *fakeUpdatesClient) GetRegistrationCountByPath(ctx context.Context, path string, endDate time.Time) (int, error) {
 	f.pathCounted = append(f.pathCounted, path)
 	return f.regByPath[path], nil
+}
+
+func (f *fakeUpdatesClient) GetParticipantCountByPath(ctx context.Context, path string) (int, error) {
+	f.partPathCounted = append(f.partPathCounted, path)
+	if f.partErr != nil {
+		return 0, f.partErr
+	}
+	return f.partByPath[path], nil
 }
 
 func (f *fakeUpdatesClient) GetAstanaUpdates(ctx context.Context) (*domain.AstanaUpdatesInfo, error) {
@@ -376,5 +388,79 @@ func TestPiscineRegistrations_DedupesSharedPathAndFiltersRegion(t *testing.T) {
 		if p == "/shymkent/module/piscine-go" {
 			t.Errorf("counted a path from another region: %q", p)
 		}
+	}
+}
+
+// TestPiscineRegistrations_ParticipantsOnlyForRunningPiscine verifies the
+// participant count is attached to a running piscine and not requested at all
+// for an upcoming one (which nobody is enrolled in yet).
+func TestPiscineRegistrations_ParticipantsOnlyForRunningPiscine(t *testing.T) {
+	client := &fakeUpdatesClient{
+		current: []domain.PiscineEvent{
+			{ID: 655, Path: "/astanahub/ai-curriculum/prompt-piscine", StartAt: time.Now()},
+		},
+		upcoming: []domain.PiscineEvent{
+			{ID: 665, Path: "/astanahub/module/piscine-rust", StartAt: time.Now().AddDate(0, 0, 14)},
+		},
+		regByPath: map[string]int{
+			"/astanahub/ai-curriculum/prompt-piscine": 42,
+			"/astanahub/module/piscine-rust":          17,
+		},
+		partByPath: map[string]int{
+			"/astanahub/ai-curriculum/prompt-piscine": 30,
+		},
+	}
+
+	uc := NewUpdatesUseCase(client, nil, nil)
+	got := uc.piscineRegistrations(
+		context.Background(), "astanahub",
+		client.current, client.upcoming, time.Now(),
+	)
+	if len(got) != 2 {
+		t.Fatalf("piscineRegistrations len = %d, want 2: %+v", len(got), got)
+	}
+
+	running := got[0]
+	if !running.HasParticipants || running.Participants != 30 {
+		t.Errorf("running piscine participants = %d (has=%v), want 30 (has=true)",
+			running.Participants, running.HasParticipants)
+	}
+
+	upcoming := got[1]
+	if upcoming.HasParticipants {
+		t.Errorf("upcoming piscine must not report participants: %+v", upcoming)
+	}
+	for _, p := range client.partPathCounted {
+		if p == "/astanahub/module/piscine-rust" {
+			t.Errorf("participants requested for an upcoming piscine: %q", p)
+		}
+	}
+}
+
+// TestPiscineRegistrations_ParticipantCountFailureIsUnknown verifies a failed
+// participant lookup leaves the piscine reported without participants rather
+// than claiming zero.
+func TestPiscineRegistrations_ParticipantCountFailureIsUnknown(t *testing.T) {
+	client := &fakeUpdatesClient{
+		current: []domain.PiscineEvent{
+			{ID: 655, Path: "/astanahub/ai-curriculum/prompt-piscine", StartAt: time.Now()},
+		},
+		regByPath: map[string]int{"/astanahub/ai-curriculum/prompt-piscine": 42},
+		partErr:   errors.New("boom"),
+	}
+
+	uc := NewUpdatesUseCase(client, nil, nil)
+	got := uc.piscineRegistrations(
+		context.Background(), "astanahub",
+		client.current, nil, time.Now(),
+	)
+	if len(got) != 1 {
+		t.Fatalf("piscineRegistrations len = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Count != 42 {
+		t.Errorf("registration count = %d, want 42 (participant failure must not drop the line)", got[0].Count)
+	}
+	if got[0].HasParticipants {
+		t.Errorf("failed participant lookup must not be reported as a count: %+v", got[0])
 	}
 }

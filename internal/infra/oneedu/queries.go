@@ -10,9 +10,14 @@ import (
 	"admin-bot/internal/domain"
 )
 
-// GetCurrentPiscineID fetches the active piscine event by name.
+// GetCurrentPiscineID fetches the active piscine event by name. See
+// currentPiscineGracePeriod for why endAt is not compared against "now()".
 func (c *Client) GetCurrentPiscineID(ctx context.Context, piscine domain.PiscineType) (*domain.PiscineInfo, error) {
-	vars := map[string]interface{}{"name": string(piscine)}
+	currentAfter := time.Now().Add(-currentPiscineGracePeriod)
+	vars := map[string]interface{}{
+		"name":         string(piscine),
+		"currentAfter": currentAfter.Format(time.RFC3339),
+	}
 
 	var resp piscineResponse
 	if err := c.runQuery(ctx, "GetCurrentPiscineId", vars, &resp); err != nil {
@@ -79,10 +84,22 @@ func (c *Client) fetchRaids(ctx context.Context, opName string, piscine domain.P
 	return raids, nil
 }
 
+// currentPiscineGracePeriod widens GetCurrentPiscines past a piscine's own
+// registered endAt. A raid's defense window stays open through the Friday
+// following its end date (see usecase.DefenseWindowEnd, max 6 days out), but
+// the piscine module's endAt in OneEdu tracks the raid schedule itself and can
+// pass before that window closes. Without this grace period the piscine drops
+// out of discovery entirely and DetectCurrentWeekForEvent never runs, so
+// /week silently stops reporting it instead of showing "завершён, идёт
+// защита" the way it does for a piscine whose endAt hasn't passed yet.
+const currentPiscineGracePeriod = 7 * 24 * time.Hour
+
 // GetCurrentPiscines fetches every currently active piscine event via
 // path-based discovery (no name filter).
 func (c *Client) GetCurrentPiscines(ctx context.Context) ([]domain.PiscineEvent, error) {
-	return c.listPiscines(ctx, "GetCurrentPiscinesId", map[string]interface{}{})
+	currentAfter := time.Now().Add(-currentPiscineGracePeriod)
+	vars := map[string]interface{}{"currentAfter": currentAfter.Format(time.RFC3339)}
+	return c.listPiscines(ctx, "GetCurrentPiscinesId", vars)
 }
 
 // GetUpcomingPiscines fetches piscine events that start within the next month.
@@ -133,6 +150,19 @@ func (c *Client) GetRegistrationCountByPath(ctx context.Context, path string, en
 		return 0, err
 	}
 	return resp.Data.Registrations.Aggregate.Count, nil
+}
+
+// GetParticipantCountByPath counts the users enrolled in the event(s) on an
+// arbitrary path. Unlike the registration count it has no time bound: it is the
+// number of people actually in the piscine right now.
+func (c *Client) GetParticipantCountByPath(ctx context.Context, path string) (int, error) {
+	vars := map[string]interface{}{"path": path}
+
+	var resp participantCountResponse
+	if err := c.runQuery(ctx, "GetParticipantCountByPath", vars, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Data.Participants.Aggregate.Count, nil
 }
 
 // GetRaidByName fetches a specific raid event by name.

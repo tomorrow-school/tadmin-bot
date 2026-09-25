@@ -118,13 +118,24 @@ func (u *UpdatesUseCase) piscineRegistrations(
 			// whole report.
 			continue
 		}
-		counts = append(counts, domain.PiscineRegistrationCount{
+		rc := domain.PiscineRegistrationCount{
 			Label:    domain.LabelFromPath(path),
 			Path:     path,
 			Count:    count,
 			Upcoming: !a.inCurrent,
 			StartAt:  a.start,
-		})
+		}
+		// Participants only make sense for a piscine that is already running —
+		// an upcoming one has registrations but nobody enrolled yet. Best-effort
+		// like the registration count: a failure leaves HasParticipants false so
+		// the caller says "unknown" instead of showing 0 participants.
+		if a.inCurrent {
+			if participants, err := u.eduClient.GetParticipantCountByPath(ctx, path); err == nil {
+				rc.Participants = participants
+				rc.HasParticipants = true
+			}
+		}
+		counts = append(counts, rc)
 	}
 	return counts
 }

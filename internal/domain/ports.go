@@ -35,6 +35,11 @@ type OneEduClient interface {
 	// piscinego count but for an arbitrary, dynamically discovered path.
 	GetRegistrationCountByPath(ctx context.Context, path string, endDate time.Time) (int, error)
 
+	// GetParticipantCountByPath returns the number of users enrolled in the
+	// event(s) on the given path — the participants of a running piscine, as
+	// opposed to the registrations counted by GetRegistrationCountByPath.
+	GetParticipantCountByPath(ctx context.Context, path string) (int, error)
+
 	// GetRaidByName returns a specific raid event by name, starting from a given date.
 	GetRaidByName(ctx context.Context, name string, startAt string) (*RaidInfo, error)
 

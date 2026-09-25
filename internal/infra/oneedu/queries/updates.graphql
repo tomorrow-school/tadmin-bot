@@ -66,6 +66,24 @@ query GetRegistrationCountByPath(
   }
 }
 
+# Participants of a piscine, counted by path rather than by a single event ID:
+# parallel streams of the same piscine share one path (see
+# usecase.piscineRegistrations), so counting by path totals them the same way the
+# registration count does.
+query GetParticipantCountByPath($path: String!) {
+  participants: event_user_aggregate(
+    where: {
+      event: {
+        path: { _eq: $path }
+      }
+    }
+  ) {
+    aggregate {
+      count
+    }
+  }
+}
+
 query all_campuses {
   object(where: { type: { _eq: "campus" } }) {
     name

@@ -309,6 +309,29 @@ func TestFormatRegionUpdatesMessage_LeadApplications(t *testing.T) {
 	}
 }
 
+// TestFormatRegionUpdatesMessage_Participants verifies a running piscine shows
+// its participant count, and that a piscine whose participant lookup failed
+// keeps the plain registration line instead of claiming 0 participants.
+func TestFormatRegionUpdatesMessage_Participants(t *testing.T) {
+	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region: "shymkent",
+		PiscineRegistrations: []domain.PiscineRegistrationCount{
+			{Label: "ai-curriculum/prompt-piscine", Count: 42, Participants: 30, HasParticipants: true},
+			{Label: "module/piscine-go", Count: 17},
+		},
+	}, "02.07.2026")
+
+	if !strings.Contains(got, "- 42 reg на ai-curriculum/prompt-piscine (участников: 30)\n") {
+		t.Errorf("running piscine should report participants:\n%s", got)
+	}
+	if !strings.Contains(got, "- 17 reg на module/piscine-go\n") {
+		t.Errorf("piscine without participant data should keep the plain line:\n%s", got)
+	}
+	if strings.Contains(got, "участников: 0") {
+		t.Errorf("unknown participant count must not be rendered as 0:\n%s", got)
+	}
+}
+
 // TestFormatRegionUpdatesMessage_StaleEvent verifies a metric backed by a stale
 // pinned event (check-in) is shown as unavailable rather than as a (misleading)
 // count.

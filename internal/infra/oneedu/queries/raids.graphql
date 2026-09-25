@@ -118,23 +118,26 @@ query GetRaidsByPiscineAiId($id: Int!) {
   }
 }
 
-query GetCurrentPiscineId($name: String!) {
-  event(where: {
-    object: { name: { _eq: $name } }
-    startAt: { _lte: "now()" }
-    endAt: { _gte: "now()" }
-    path: {_iregex: "astanahub"}
-  }) {
+query GetCurrentPiscineId($name: String!, $currentAfter: timestamptz!) {
+  event(
+    where: {
+      object: { name: { _eq: $name } }
+      startAt: { _lte: "now()" }
+      endAt: { _gte: $currentAfter }
+      path: {_iregex: "astanahub"}
+    }
+    order_by: { endAt: desc }
+  ) {
     id
     startAt
     endAt
   }
 }
 
-query GetCurrentPiscinesId {
+query GetCurrentPiscinesId($currentAfter: timestamptz!) {
   event(where: {
     startAt: { _lte: "now()" }
-    endAt: { _gte: "now()" }
+    endAt: { _gte: $currentAfter }
     _and: [
       { path: { _iregex: "astanahub" } }
       { path: { _iregex: "piscine" } }

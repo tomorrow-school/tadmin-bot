@@ -21,6 +21,13 @@ type PiscineRegistrationCount struct {
 	Count    int       // registration_user_aggregate count for the path
 	Upcoming bool      // true when the piscine has not started yet
 	StartAt  time.Time // start of the (earliest) event for this path; used for upcoming
+
+	// Participants is the number of users enrolled in the piscine's event(s) —
+	// the people actually taking part, as opposed to Count (registrations).
+	// Fetched only for a running piscine; meaningful only when HasParticipants
+	// is true, so a failed count is reported as unknown rather than as 0.
+	Participants    int
+	HasParticipants bool
 }
 
 // LeadCounts holds application (lead) counts for a campus: the all-time total
