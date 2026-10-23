@@ -39,7 +39,8 @@ func (h *Handler) HandleHelp(ctx context.Context, b *bot.Bot, update *models.Upd
 		"/subscribe — включить/отключить анонсы и выбрать бассейны\n" +
 		"/get_region_updates — статистика обновлений по всем регионам\n" +
 		"/get_astana_updates — статистика обновлений Astana\n" +
-		"/get_event {id} — информация об ивенте (участники, регистрация, даты)\n"
+		"/get_event {id} — информация об ивенте (участники, регистрация, даты)\n" +
+		"/regions_checkin_piscine — check-in и piscine по регионам: id, дата, число людей\n"
 
 	if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 		h.logger.Error("send help failed", "err", err)
@@ -516,6 +517,34 @@ func (h *Handler) HandleRegionUpdates(ctx context.Context, b *bot.Bot, update *m
 		if err := h.adapter.SendMessage(ctx, chatID, text); err != nil {
 			h.logger.Error("send partial region updates failed", "err", err)
 		}
+	}
+}
+
+// HandleRegionsCheckinPiscine handles /regions_checkin_piscine — the check-in
+// and piscine events of every region with their head counts, in one message.
+func (h *Handler) HandleRegionsCheckinPiscine(ctx context.Context, b *bot.Bot, update *models.Update) {
+	chatID, ok := h.guard(ctx, update)
+	if !ok {
+		return
+	}
+
+	now := h.now()
+	regions := h.updatesUC.GetRegionsCheckinPiscine(ctx, now)
+
+	failed := 0
+	for _, r := range regions {
+		if r.Err != nil {
+			failed++
+			h.logger.Error("get regions checkin/piscine failed", "region", r.Region, "err", r.Err)
+		}
+	}
+	if failed == len(regions) {
+		_ = h.adapter.SendMessage(ctx, chatID, "❌ Не удалось получить check-in и piscine ни для одного региона")
+		return
+	}
+
+	if err := h.adapter.SendMessage(ctx, chatID, formatRegionsCheckinPiscineMessage(regions, now, h.loc)); err != nil {
+		h.logger.Error("send regions checkin/piscine failed", "err", err)
 	}
 }
 

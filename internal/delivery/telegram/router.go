@@ -29,6 +29,10 @@ func RegisterHandlers(b *bot.Bot, h *Handler) {
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/announce", bot.MatchTypeExact, h.HandleAnnounce)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/get_astana_updates", bot.MatchTypeExact, h.HandleAstanaUpdates)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/get_region_updates", bot.MatchTypeExact, h.HandleRegionUpdates)
+	// Telegram commands allow only [a-z0-9_], so the menu/clickable form is
+	// /regions_checkin_piscine; the hyphenated spelling is accepted when typed.
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/regions_checkin_piscine", bot.MatchTypeExact, h.HandleRegionsCheckinPiscine)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/regions-checkin-piscine", bot.MatchTypeExact, h.HandleRegionsCheckinPiscine)
 	// /get_event carries an argument (the event ID), so it must match by prefix.
 	// Registered after the exact commands above; findHandler returns the first
 	// match, and "/get_event" is not a prefix of any exact command, so none are

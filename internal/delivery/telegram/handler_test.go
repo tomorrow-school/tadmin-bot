@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -306,6 +307,65 @@ func TestFormatRegionUpdatesMessage_LeadApplications(t *testing.T) {
 	}, "02.07.2026")
 	if strings.Contains(without, "заявок с сайта") {
 		t.Errorf("lead line must be omitted when data absent:\n%s", without)
+	}
+}
+
+// TestFormatRegionUpdatesMessage_Participants verifies a running piscine shows
+// its participant count, and that a piscine whose participant lookup failed
+// keeps the plain registration line instead of claiming 0 participants.
+func TestFormatRegionUpdatesMessage_Participants(t *testing.T) {
+	got := formatRegionUpdatesMessage(domain.RegionUpdatesInfo{
+		Region: "shymkent",
+		PiscineRegistrations: []domain.PiscineRegistrationCount{
+			{Label: "ai-curriculum/prompt-piscine", Count: 42, Participants: 30, HasParticipants: true},
+			{Label: "module/piscine-go", Count: 17},
+		},
+	}, "02.07.2026")
+
+	if !strings.Contains(got, "- 42 reg на ai-curriculum/prompt-piscine (участников: 30)\n") {
+		t.Errorf("running piscine should report participants:\n%s", got)
+	}
+	if !strings.Contains(got, "- 17 reg на module/piscine-go\n") {
+		t.Errorf("piscine without participant data should keep the plain line:\n%s", got)
+	}
+	if strings.Contains(got, "участников: 0") {
+		t.Errorf("unknown participant count must not be rendered as 0:\n%s", got)
+	}
+}
+
+// TestFormatRegionsCheckinPiscineMessage verifies the per-event line format
+// (name, id, start date in the configured timezone, Count), the "завершён" mark
+// on an ended event, and how empty and failed regions are shown.
+func TestFormatRegionsCheckinPiscineMessage(t *testing.T) {
+	almaty := time.FixedZone("Asia/Almaty", 5*3600)
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, almaty)
+
+	got := formatRegionsCheckinPiscineMessage([]domain.RegionRecruitment{
+		{Region: "Kokshetau", Events: []domain.RecruitmentEvent{
+			{ID: 933, Name: "Piscine Go",
+				StartAt:      time.Date(2026, 9, 20, 19, 0, 0, 0, time.UTC), // 21.09 in Almaty
+				EndAt:        time.Date(2026, 10, 17, 18, 0, 0, 0, almaty),
+				Participants: 92},
+			{ID: 1141, Name: "Check-in",
+				StartAt:      time.Date(2026, 10, 25, 9, 0, 0, 0, almaty),
+				EndAt:        time.Date(2026, 10, 25, 18, 0, 0, 0, almaty),
+				Applications: 16},
+		}},
+		{Region: "Taraz"},
+		{Region: "Semey", Err: errors.New("boom")},
+	}, now, almaty)
+
+	for _, want := range []string{
+		"(23.10.2026)",
+		"<b>Kokshetau</b>\n",
+		"Piscine Go #933 (21.09.2026): 92 reg — завершён\n",
+		"Check-in #1141 (25.10.2026): 16 reg\n",
+		"<b>Taraz</b>\n— нет ивентов\n",
+		"<b>Semey</b>\n⚠️ не удалось получить данные\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
 	}
 }
 

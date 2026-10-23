@@ -35,6 +35,11 @@ type OneEduClient interface {
 	// piscinego count but for an arbitrary, dynamically discovered path.
 	GetRegistrationCountByPath(ctx context.Context, path string, endDate time.Time) (int, error)
 
+	// GetParticipantCountByPath returns the number of users enrolled in the
+	// event(s) on the given path — the participants of a running piscine, as
+	// opposed to the registrations counted by GetRegistrationCountByPath.
+	GetParticipantCountByPath(ctx context.Context, path string) (int, error)
+
 	// GetRaidByName returns a specific raid event by name, starting from a given date.
 	GetRaidByName(ctx context.Context, name string, startAt string) (*RaidInfo, error)
 
@@ -57,6 +62,11 @@ type OneEduClient interface {
 	// events pins the authoritative event IDs for the region; a zero-valued
 	// config makes every metric fall back to the default path-based lookup.
 	GetRegionUpdates(ctx context.Context, campus string, events RegionUpdateEventsConfig) (*RegionUpdatesInfo, error)
+
+	// GetRecruitmentEvents returns the check-in (interview) and piscine events
+	// of a campus that end at or after since, ordered by start. campus is the
+	// path segment of the campus (e.g. "uralsk").
+	GetRecruitmentEvents(ctx context.Context, campus string, since time.Time) ([]RecruitmentEvent, error)
 }
 
 // LeadClient fetches application (lead) counts from the public apply/leadform

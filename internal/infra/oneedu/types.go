@@ -38,6 +38,13 @@ type registrationCountResponse struct {
 	} `json:"data"`
 }
 
+// participantCountResponse is the response for GetParticipantCountByPath.
+type participantCountResponse struct {
+	Data struct {
+		Participants aggregateCountNode `json:"participants"`
+	} `json:"data"`
+}
+
 // raidsResponse is the response for GetRaidsByPiscine*Id and GetRaidByName.
 type raidsResponse struct {
 	Data struct {
@@ -128,6 +135,24 @@ type eventRegistrationNode struct {
 	StartAt        time.Time          `json:"startAt"`
 	EndAt          time.Time          `json:"endAt"`
 	UsersAggregate aggregateCountNode `json:"users_aggregate"`
+}
+
+// recruitmentEventsResponse is the response for RegionCheckinPiscine.
+type recruitmentEventsResponse struct {
+	Data struct {
+		Event []recruitmentEventNode `json:"event"`
+	} `json:"data"`
+}
+
+type recruitmentEventNode struct {
+	ID            int                `json:"id"`
+	StartAt       time.Time          `json:"startAt"`
+	EndAt         time.Time          `json:"endAt"`
+	Object        objectNode         `json:"object"`
+	Participants  aggregateCountNode `json:"participants"`
+	Registrations []struct {
+		Applications aggregateCountNode `json:"applications"`
+	} `json:"registrations"`
 }
 
 type campusesResponse struct {

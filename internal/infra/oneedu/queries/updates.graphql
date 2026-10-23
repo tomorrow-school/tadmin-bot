@@ -66,6 +66,54 @@ query GetRegistrationCountByPath(
   }
 }
 
+# Participants of a piscine, counted by path rather than by a single event ID:
+# parallel streams of the same piscine share one path (see
+# usecase.piscineRegistrations), so counting by path totals them the same way the
+# registration count does.
+query GetParticipantCountByPath($path: String!) {
+  participants: event_user_aggregate(
+    where: {
+      event: {
+        path: { _eq: $path }
+      }
+    }
+  ) {
+    aggregate {
+      count
+    }
+  }
+}
+
+# Check-in и piscine одного кампуса для /regions_checkin_piscine.
+#
+# object.type, а не слово в пути: регекс "check" затягивал checkpoint-01,
+# final-checkpoint и quadchecker — это exam и raid внутри набора.
+# Окно по endAt, а не по startAt: piscine идёт месяц, и набор, стартовавший
+# раньше окна, нужен в отчёте, пока он не закончился.
+#
+# participants — зачисленные (event_user); applications — заявки по каждому окну
+# регистрации. Какой из счётчиков идёт в отчёт, решает
+# domain.RecruitmentEvent.Count.
+query RegionCheckinPiscine($campusRegex: String!, $since: timestamptz!) {
+  event(
+    where: {
+      endAt: { _gte: $since }
+      _and: [
+        { path: { _iregex: $campusRegex } }
+        { object: { type: { _in: ["interview", "piscine"] } } }
+      ]
+    }
+    order_by: { startAt: asc }
+  ) {
+    id
+    startAt
+    endAt
+    object { type, name }
+    participants: users_aggregate { aggregate { count } }
+    registrations { applications: users_aggregate { aggregate { count } } }
+  }
+}
+
 query all_campuses {
   object(where: { type: { _eq: "campus" } }) {
     name
