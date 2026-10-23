@@ -164,6 +164,23 @@ go run cmd/bot/main.go
 | `/get_astana_updates` | Статистика обновлений Astana |
 | `/get_region_updates` | Статистика по регионам (кроме Astana) |
 | `/get_event {id}` | Информация об ивенте (участники, регистрация, даты) |
+| `/regions_checkin_piscine` | Check-in и piscine по регионам: id, дата старта, число людей (см. ниже) |
+
+### `/regions_checkin_piscine`
+
+Одним сообщением по 11 регионам (Shymkent, Semey, Petropavlovsk, Kokshetau, Kostanay, Taldykorgan, Pavlodar, Oral, Oskemen, Turkistan, Taraz) — ивенты с `object.type` `interview` (check-in) и `piscine`, у которых `endAt` не раньше полуночи неделю назад (`TIMEZONE`):
+
+```
+Kokshetau
+Piscine Go #933 (21.09.2026): 92 reg — завершён
+Check-in #1141 (16.10.2026): 105 reg
+```
+
+- Название — `object.name`, дата — `startAt`; закончившийся ивент помечается «завершён».
+- Число: участники ивента (`event_user`), если их больше нуля, иначе сумма заявок по всем окнам регистрации. До старта есть только заявки; при старте они превращаются в участников, а на check-in людей ещё досаживают вручную.
+- Тип берётся из `object.type`, а не из пути: поиск по слову «check» цеплял checkpoint/quadchecker.
+- Oral на платформе называется `uralsk` — по `/oral/` ничего не находится.
+- Telegram не разрешает дефисы в командах, поэтому основное имя — с подчёркиваниями; `/regions-checkin-piscine` тоже принимается, если набрать вручную.
 
 ### Окно защиты: закончившийся рейд остаётся актуальным
 

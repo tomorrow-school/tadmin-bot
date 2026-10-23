@@ -98,6 +98,39 @@ func formatEventInfoMessage(info domain.EventInfo, loc *time.Location) string {
 	return sb.String()
 }
 
+// formatRegionsCheckinPiscineMessage renders /regions_checkin_piscine: one block
+// per region, one line per event —
+//
+//	Check-in #1141 (16.10.2026): 16 reg
+//
+// The label is the event's object.name, the date its start in loc, the number
+// RecruitmentEvent.Count. Events that already ended are marked so a finished
+// cohort is not read as the running one.
+func formatRegionsCheckinPiscineMessage(regions []domain.RegionRecruitment, now time.Time, loc *time.Location) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📋 <b>Check-in и Piscine по регионам</b> (%s)\n", now.In(loc).Format("02.01.2006"))
+	for _, r := range regions {
+		fmt.Fprintf(&sb, "\n<b>%s</b>\n", escapeHTML(r.Region))
+		if r.Err != nil {
+			sb.WriteString("⚠️ не удалось получить данные\n")
+			continue
+		}
+		if len(r.Events) == 0 {
+			sb.WriteString("— нет ивентов\n")
+			continue
+		}
+		for _, e := range r.Events {
+			fmt.Fprintf(&sb, "%s #%d (%s): %d reg",
+				escapeHTML(e.Name), e.ID, e.StartAt.In(loc).Format("02.01.2006"), e.Count())
+			if e.Ended(now) {
+				sb.WriteString(" — завершён")
+			}
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
 // fmtEventTime formats an event/registration timestamp in loc, or returns "—"
 // for a zero (missing) time.
 func fmtEventTime(t time.Time, loc *time.Location) string {

@@ -27,6 +27,20 @@ type fakeUpdatesClient struct {
 	partByPath      map[string]int // path -> participant count
 	partErr         error          // when set, GetParticipantCountByPath fails
 	partPathCounted []string       // paths passed to GetParticipantCountByPath
+
+	recruitment      map[string][]domain.RecruitmentEvent // campus -> events
+	recruitmentErr   map[string]error                     // campus -> GetRecruitmentEvents error
+	recruitmentCalls []string                             // campuses passed to GetRecruitmentEvents
+	recruitmentSince time.Time                            // last since passed to GetRecruitmentEvents
+}
+
+func (f *fakeUpdatesClient) GetRecruitmentEvents(ctx context.Context, campus string, since time.Time) ([]domain.RecruitmentEvent, error) {
+	f.recruitmentCalls = append(f.recruitmentCalls, campus)
+	f.recruitmentSince = since
+	if err := f.recruitmentErr[campus]; err != nil {
+		return nil, err
+	}
+	return f.recruitment[campus], nil
 }
 
 func (f *fakeUpdatesClient) RefreshToken(ctx context.Context) error {

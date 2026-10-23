@@ -284,6 +284,44 @@ func (c *Client) GetEventInfo(ctx context.Context, id int) (*domain.EventInfo, e
 	return info, nil
 }
 
+// GetRecruitmentEvents fetches the check-in (interview) and piscine events of
+// one campus that end at or after since, ordered by start. campus is the path
+// segment ("uralsk", not "oral"); it is anchored so "/semey/" cannot match a
+// campus that merely contains the word.
+func (c *Client) GetRecruitmentEvents(ctx context.Context, campus string, since time.Time) ([]domain.RecruitmentEvent, error) {
+	campus = strings.TrimSpace(campus)
+	if campus == "" {
+		return nil, fmt.Errorf("empty campus name")
+	}
+	vars := map[string]interface{}{
+		"campusRegex": "^/" + regexp.QuoteMeta(campus) + "/",
+		"since":       since.Format(time.RFC3339),
+	}
+
+	var resp recruitmentEventsResponse
+	if err := c.runQuery(ctx, "RegionCheckinPiscine", vars, &resp); err != nil {
+		return nil, err
+	}
+
+	events := make([]domain.RecruitmentEvent, 0, len(resp.Data.Event))
+	for _, ev := range resp.Data.Event {
+		re := domain.RecruitmentEvent{
+			ID:           ev.ID,
+			Type:         ev.Object.Type,
+			Name:         ev.Object.Name,
+			StartAt:      ev.StartAt,
+			EndAt:        ev.EndAt,
+			Participants: ev.Participants.Aggregate.Count,
+		}
+		// An event can have several registration windows; applications is their sum.
+		for _, r := range ev.Registrations {
+			re.Applications += r.Applications.Aggregate.Count
+		}
+		events = append(events, re)
+	}
+	return events, nil
+}
+
 // GetRegionUpdates fetches onboarding and registration stats for one campus.
 //
 // The pinned event IDs in events are the source of truth: each configured ID is

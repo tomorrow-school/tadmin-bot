@@ -62,6 +62,11 @@ type OneEduClient interface {
 	// events pins the authoritative event IDs for the region; a zero-valued
 	// config makes every metric fall back to the default path-based lookup.
 	GetRegionUpdates(ctx context.Context, campus string, events RegionUpdateEventsConfig) (*RegionUpdatesInfo, error)
+
+	// GetRecruitmentEvents returns the check-in (interview) and piscine events
+	// of a campus that end at or after since, ordered by start. campus is the
+	// path segment of the campus (e.g. "uralsk").
+	GetRecruitmentEvents(ctx context.Context, campus string, since time.Time) ([]RecruitmentEvent, error)
 }
 
 // LeadClient fetches application (lead) counts from the public apply/leadform

@@ -137,6 +137,24 @@ type eventRegistrationNode struct {
 	UsersAggregate aggregateCountNode `json:"users_aggregate"`
 }
 
+// recruitmentEventsResponse is the response for RegionCheckinPiscine.
+type recruitmentEventsResponse struct {
+	Data struct {
+		Event []recruitmentEventNode `json:"event"`
+	} `json:"data"`
+}
+
+type recruitmentEventNode struct {
+	ID            int                `json:"id"`
+	StartAt       time.Time          `json:"startAt"`
+	EndAt         time.Time          `json:"endAt"`
+	Object        objectNode         `json:"object"`
+	Participants  aggregateCountNode `json:"participants"`
+	Registrations []struct {
+		Applications aggregateCountNode `json:"applications"`
+	} `json:"registrations"`
+}
+
 type campusesResponse struct {
 	Data *campusesNode `json:"data"`
 }
